@@ -1,9 +1,24 @@
 // Import the component loader and page utilities
 import { importComponent } from "/js/components.js";
 import { callJsExtensions } from "/js/extensions.js";
+import { store as rightCanvasStore } from "/components/canvas/right-canvas-store.js";
 
 // Modal functionality
 const modalStack = [];
+
+function findModalIndexByPath(modalPath) {
+  return modalStack.findIndex((modal) => modal.path === modalPath);
+}
+
+function focusModal(modalPath) {
+  const modalIndex = findModalIndexByPath(modalPath);
+  if (modalIndex === -1) return false;
+  if (modalIndex === modalStack.length - 1) return true;
+  const [modal] = modalStack.splice(modalIndex, 1);
+  modalStack.push(modal);
+  updateModalZIndexes();
+  return true;
+}
 
 function getModalScrollElement(modal) {
   return modal?.element?.querySelector(".modal-scroll");
@@ -35,8 +50,21 @@ function restoreModalScrollSnapshot(modal) {
 const backdrop = document.createElement("div");
 backdrop.className = "modal-backdrop";
 backdrop.style.display = "none";
-backdrop.style.backdropFilter = "blur(5px)";
+backdrop.style.backdropFilter = "blur(8px) saturate(112%)";
 document.body.appendChild(backdrop);
+
+function modalSuppressesBackdrop(modal) {
+  const path = String(modal?.path || "");
+  return path === "/plugins/_browser/webui/main.html"
+    || path === "plugins/_browser/webui/main.html"
+    || path === "/plugins/_office/webui/main.html"
+    || path === "plugins/_office/webui/main.html"
+    || path === "/plugins/_time_travel/webui/main.html"
+    || path === "plugins/_time_travel/webui/main.html"
+    || modal?.element?.classList?.contains("modal-floating")
+    || modal?.element?.classList?.contains("modal-no-backdrop")
+    || modal?.inner?.classList?.contains("modal-no-backdrop");
+}
 
 // Function to update z-index for all modals and backdrop
 function updateModalZIndexes() {
@@ -51,20 +79,26 @@ function updateModalZIndexes() {
     modal.element.style.zIndex = baseZIndex + index * 20;
   });
 
-  // Always show backdrop
-  backdrop.style.display = "block";
+  const backdropModalStack = modalStack.filter((modal) => !modalSuppressesBackdrop(modal));
 
-  if (modalStack.length > 1) {
-    // For multiple modals, position backdrop between the top two
-    const topModalIndex = modalStack.length - 1;
-    const previousModalZIndex = baseZIndex + (topModalIndex - 1) * 20;
-    backdrop.style.zIndex = previousModalZIndex + 10;
-  } else if (modalStack.length === 1) {
-    // For single modal, position backdrop below it
-    backdrop.style.zIndex = baseZIndex - 1;
-  } else {
-    // No modals, hide backdrop
+  if (backdropModalStack.length === 0) {
     backdrop.style.display = "none";
+    return;
+  }
+
+  backdrop.style.display = "block";
+  backdrop.style.backdropFilter = "blur(8px) saturate(112%)";
+  backdrop.style.backgroundColor = "";
+
+  if (backdropModalStack.length === modalStack.length && modalStack.length > 1) {
+    const topModalIndex = modalStack.length - 1;
+    backdrop.style.zIndex = baseZIndex + (topModalIndex - 1) * 20 + 10;
+  } else {
+    const topBackdropModal = backdropModalStack[backdropModalStack.length - 1];
+    const topBackdropModalIndex = modalStack.indexOf(topBackdropModal);
+    backdrop.style.zIndex = topBackdropModalIndex > 0
+      ? baseZIndex + (topBackdropModalIndex - 1) * 20 + 10
+      : baseZIndex - 1;
   }
 }
 
@@ -122,6 +156,7 @@ function createModalElement(path) {
     path: path,
     element: newModal,
     title: newModal.querySelector(".modal-title"),
+    header: newModal.querySelector(".modal-header"),
     body: newModal.querySelector(".modal-bd"),
     close: close_button,
     footerSlot: newModal.querySelector(".modal-footer-slot"),
@@ -131,6 +166,57 @@ function createModalElement(path) {
     beforeClose: null,
     savedScrollSnapshot: null,
   };
+}
+
+function getDockMetadata(doc, modalPath) {
+  const htmlDataset = doc?.documentElement?.dataset || {};
+  const bodyDataset = doc?.body?.dataset || {};
+  const surfaceId = htmlDataset.canvasSurface || bodyDataset.canvasSurface || "";
+  if (!surfaceId) return null;
+  return {
+    surfaceId,
+    modalPath: htmlDataset.canvasModalPath || bodyDataset.canvasModalPath || modalPath,
+    title: htmlDataset.canvasDockTitle || bodyDataset.canvasDockTitle || "Open in canvas",
+    icon: htmlDataset.canvasDockIcon || bodyDataset.canvasDockIcon || "dock_to_right",
+  };
+}
+
+function configureModalDockButton(modal, doc) {
+  const metadata = getDockMetadata(doc, modal.path);
+  if (!metadata || !modal.header || modal.header.querySelector(".modal-dock-button")) {
+    return;
+  }
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "modal-dock-button";
+  button.title = metadata.title;
+  button.setAttribute("aria-label", metadata.title);
+  button.innerHTML = `<span class="material-symbols-outlined" aria-hidden="true">${metadata.icon}</span>`;
+  button.addEventListener("click", async () => {
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+      await rightCanvasStore.dockSurface?.(metadata.surfaceId, {
+        modalPath: metadata.modalPath,
+        sourceModalPath: modal.path,
+        source: "modal",
+        closeSourceModal: async () => {
+          const closed = await closeModal(modal.path);
+          if (closed === false) return false;
+          if (document.contains(modal.element)) {
+            const fallbackClosed = await closeModal();
+            if (fallbackClosed === false) return false;
+          }
+          return !document.contains(modal.element);
+        },
+      });
+    } finally {
+      if (document.contains(button)) button.disabled = false;
+    }
+  });
+
+  modal.close?.insertAdjacentElement("beforebegin", button);
 }
 
 // Function to open modal with content from URL
@@ -179,6 +265,8 @@ export async function openModal(modalPath, beforeClose = null) {
           if (doc.body && doc.body.classList) {
             modal.body.classList.add(...doc.body.classList);
           }
+          configureModalDockButton(modal, doc);
+          updateModalZIndexes();
           
           // Some modals have a footer. Check if it exists and move it to footer slot
           // Use requestAnimationFrame to let Alpine mount the component first
@@ -211,6 +299,26 @@ export async function openModal(modalPath, beforeClose = null) {
       resolve();
     }
   });
+}
+
+export function isModalOpen(modalPath) {
+  return findModalIndexByPath(modalPath) !== -1;
+}
+
+export async function ensureModalOpen(modalPath, beforeClose = null) {
+  if (focusModal(modalPath)) return null;
+  return openModal(modalPath, beforeClose);
+}
+
+export async function toggleModal(modalPath, beforeClose = null) {
+  if (!isModalOpen(modalPath)) {
+    return openModal(modalPath, beforeClose);
+  }
+  while (isModalOpen(modalPath)) {
+    const closed = await closeModal(modalPath);
+    if (closed === false) return false;
+  }
+  return true;
 }
 
 // Function to close modal
@@ -369,3 +477,6 @@ document.addEventListener("keydown", (e) => {
 globalThis.openModal = openModal;
 globalThis.closeModal = closeModal;
 globalThis.scrollModal = scrollModal;
+globalThis.isModalOpen = isModalOpen;
+globalThis.ensureModalOpen = ensureModalOpen;
+globalThis.toggleModal = toggleModal;

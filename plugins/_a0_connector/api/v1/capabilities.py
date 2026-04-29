@@ -21,6 +21,7 @@ _BASE_FEATURES = [
     "projects",
     "text_editor_remote",
     "code_execution_remote",
+    "computer_use_remote",
     "remote_file_tree",
     "token_status",
 ]
@@ -28,6 +29,7 @@ _BASE_FEATURES = [
 _OPTIONAL_FEATURES: dict[str, tuple[str, ...]] = {
     "settings_get": ("helpers.settings", "helpers.subagents"),
     "settings_set": ("helpers.settings", "helpers.subagents"),
+    "agent_profile_set": ("api.agent_profile_set",),
     "agents_list": ("helpers.subagents",),
     "skills_list": ("helpers.skills", "helpers.files", "helpers.projects", "helpers.runtime"),
     "skills_delete": ("helpers.skills", "helpers.files", "helpers.projects", "helpers.runtime"),
@@ -79,7 +81,8 @@ class Capabilities(connector_base.PublicConnectorApiHandler):
             "websocket_namespace": "/ws",
             "websocket_handlers": ["plugins/_a0_connector/ws_connector"],
             "attachments": {
-                "mode": "base64",
+                "mode": "path_or_url",
+                "http_upload": "base64_to_file",
                 "max_files": 20,
             },
             "features": _feature_list(),
