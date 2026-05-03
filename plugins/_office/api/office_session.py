@@ -1,150 +1,207 @@
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
-from urllib.parse import quote, urlparse
-
-import httpx
 from helpers.api import ApiHandler, Request
-from plugins._office.helpers import collabora_runtime, collabora_status, wopi_store
-
-
-DISCOVERY_URLS = (
-    "http://127.0.0.1:9980/office/hosting/discovery",
-    "http://127.0.0.1:9980/hosting/discovery",
-)
+from plugins._office.helpers import document_store, libreoffice, libreoffice_desktop, markdown_sessions
 
 
 class OfficeSession(ApiHandler):
     async def process(self, input: dict, request: Request) -> dict:
-        action = str(input.get("action") or "open").lower()
+        action = str(input.get("action") or "open").lower().strip()
+        context_id = str(input.get("ctxid") or input.get("context_id") or "").strip()
+
         if action == "status":
-            return collabora_status.collect_status()
-        if action == "retry":
-            collabora_runtime.retry_bootstrap()
-            return {"ok": True, **collabora_status.read_status()}
-        if action == "recent":
-            return {"ok": True, "documents": wopi_store.get_recent_documents()}
-        if action == "open_documents":
-            return {"ok": True, "documents": wopi_store.get_open_documents(limit=24)}
-        if action == "sync_open_sessions":
-            session_ids = input.get("session_ids")
-            if not isinstance(session_ids, list):
-                session_ids = []
-            closed = wopi_store.sync_open_sessions(session_ids)
-            return {"ok": True, "closed": closed, "documents": wopi_store.get_open_documents(limit=24)}
+            return libreoffice.collect_status()
+        if action == "home":
+            return {"ok": True, "path": document_store.default_open_path(context_id)}
+        if action == "desktop":
+            return self._desktop()
         if action == "close":
-            closed = wopi_store.close_session(
+            closed = document_store.close_session(
                 session_id=str(input.get("session_id") or ""),
                 file_id=str(input.get("file_id") or ""),
             )
-            return {"ok": True, "closed": closed, "documents": wopi_store.get_open_documents(limit=24)}
+            return {"ok": True, "closed": closed}
         if action == "create":
-            doc = wopi_store.create_document(
-                kind=str(input.get("kind") or "document"),
-                title=str(input.get("title") or "Untitled"),
-                fmt=str(input.get("format") or "docx"),
-                content=str(input.get("content") or ""),
-                path=str(input.get("path") or ""),
-            )
+            try:
+                doc = document_store.create_document(
+                    kind=str(input.get("kind") or "document"),
+                    title=str(input.get("title") or "Untitled"),
+                    fmt=str(input.get("format") or "md"),
+                    content=str(input.get("content") or ""),
+                    path=str(input.get("path") or ""),
+                    context_id=context_id,
+                )
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            if doc["extension"] == "docx":
+                validation = libreoffice.validate_docx(doc["path"])
+                if not validation.get("ok"):
+                    return {"ok": False, "error": validation.get("error") or "DOCX validation failed."}
             return await self._open_document(doc, input, request)
         if action == "open":
             file_id = str(input.get("file_id") or "").strip()
-            doc = (
-                wopi_store.get_document(file_id)
-                if file_id
-                else wopi_store.register_document(str(input.get("path") or ""))
-            )
+            try:
+                doc = (
+                    document_store.get_document(file_id)
+                    if file_id
+                    else document_store.register_document(str(input.get("path") or ""), context_id=context_id)
+                )
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
             return await self._open_document(doc, input, request)
+        if action == "save":
+            return self._save(input)
+        if action == "renamed":
+            return self._renamed(input, context_id)
+        if action == "desktop_save":
+            return self._desktop_save(input)
+        if action == "desktop_sync":
+            return self._desktop_sync(input)
         return {"ok": False, "error": f"Unsupported office session action: {action}"}
 
     async def _open_document(self, doc: dict, input: dict, request: Request) -> dict:
         mode = "edit" if str(input.get("mode") or "edit").lower() == "edit" else "view"
-        permission = "write" if mode == "edit" else "read"
-        origin = self._origin(request)
-        session = wopi_store.create_session(
+        store_session = document_store.create_session(
             doc["file_id"],
             user_id=str(input.get("user_id") or "agent-zero-user"),
-            permission=permission,
-            origin=origin,
+            permission="write" if mode == "edit" else "read",
+            origin=self._origin(request),
         )
-        discovery = await self._discover()
-        if not discovery.get("ok"):
+        if str(doc.get("extension") or "").lower() in libreoffice_desktop.OFFICIAL_EXTENSIONS:
+            desktop = libreoffice_desktop.get_manager().open(doc)
+            if not desktop.get("available"):
+                document_store.close_session(session_id=store_session["session_id"])
+                return {
+                    "ok": False,
+                    "error": desktop.get("error") or desktop.get("reason") or "Official LibreOffice desktop session is unavailable.",
+                    "desktop": desktop,
+                    "libreoffice": libreoffice.collect_status(),
+                }
             return {
-                "ok": False,
-                "error": discovery.get("error") or "Collabora discovery is unavailable",
+                "ok": True,
+                "session_id": desktop["session_id"],
+                "desktop_session_id": desktop["session_id"],
                 "file_id": doc["file_id"],
                 "title": doc["basename"],
                 "extension": doc["extension"],
-                "status": collabora_status.collect_status(),
+                "path": doc["path"],
+                "text": "",
+                "document": _public_doc(doc),
+                "version": document_store.item_version(doc),
+                "desktop": desktop,
+                "store_session_id": store_session["session_id"],
+                "mode": mode,
             }
+        try:
+            editor = markdown_sessions.get_manager().open(doc, sid="")
+        except ValueError as exc:
+            document_store.close_session(session_id=store_session["session_id"])
+            return {"ok": False, "error": str(exc)}
+        return {
+            **editor,
+            "store_session_id": store_session["session_id"],
+            "session_id": editor["session_id"],
+            "mode": mode,
+        }
 
-        action_url = self._select_action(discovery["xml"], doc["extension"], mode)
-        if not action_url:
-            return {
-                "ok": False,
-                "error": f"Collabora does not advertise {mode} support for .{doc['extension']}",
-                "file_id": doc["file_id"],
-                "title": doc["basename"],
-                "extension": doc["extension"],
-            }
+    def _save(self, input: dict) -> dict:
+        session_id = str(input.get("session_id") or "").strip()
+        if not session_id:
+            return {"ok": False, "error": "session_id is required."}
+        return markdown_sessions.get_manager().save(session_id, text=input.get("text"))
 
-        wopi_src = f"http://127.0.0.1:80/wopi/files/{doc['file_id']}"
-        iframe_action = self._same_origin_action(action_url, wopi_src, session["session_id"])
+    def _renamed(self, input: dict, context_id: str = "") -> dict:
+        file_id = str(input.get("file_id") or "").strip()
+        path = str(input.get("path") or "").strip()
+        if not file_id:
+            return {"ok": False, "error": "file_id is required."}
+        if not path:
+            return {"ok": False, "error": "path is required."}
+        try:
+            updated = document_store.rename_document(
+                file_id,
+                path,
+                content=input.get("text") if "text" in input else None,
+                context_id=context_id,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        desktop = None
+        if str(updated.get("extension") or "").lower() in libreoffice_desktop.OFFICIAL_EXTENSIONS:
+            desktop = libreoffice_desktop.get_manager().retarget_document(file_id, updated)
         return {
             "ok": True,
-            "file_id": doc["file_id"],
-            "session_id": session["session_id"],
-            "iframe_action": iframe_action,
-            "access_token": session["access_token"],
-            "access_token_ttl": session["access_token_ttl"],
-            "post_message_origin": origin,
-            "title": doc["basename"],
-            "extension": doc["extension"],
-            "path": doc["path"],
-            "version": wopi_store.item_version(doc),
-            "preview": wopi_store.build_preview(doc),
+            "document": _public_doc(updated),
+            "version": document_store.item_version(updated),
+            "desktop": desktop,
+            "refreshFiles": False,
         }
+
+    def _desktop(self) -> dict:
+        desktop = libreoffice_desktop.get_manager().ensure_system_desktop()
+        if not desktop.get("available"):
+            return {
+                "ok": False,
+                "error": desktop.get("error") or "Official LibreOffice desktop session is unavailable.",
+                "desktop": desktop,
+                "libreoffice": libreoffice.collect_status(),
+            }
+        document = {
+            "file_id": libreoffice_desktop.SYSTEM_FILE_ID,
+            "path": desktop["path"],
+            "basename": desktop["title"],
+            "title": desktop["title"],
+            "extension": "desktop",
+            "size": 0,
+            "version": 0,
+        }
+        return {
+            "ok": True,
+            "session_id": desktop["session_id"],
+            "desktop_session_id": desktop["session_id"],
+            "file_id": libreoffice_desktop.SYSTEM_FILE_ID,
+            "title": desktop["title"],
+            "extension": "desktop",
+            "path": desktop["path"],
+            "text": "",
+            "document": document,
+            "version": 0,
+            "desktop": desktop,
+            "store_session_id": "",
+            "mode": "desktop",
+        }
+
+    def _desktop_save(self, input: dict) -> dict:
+        session_id = str(input.get("desktop_session_id") or input.get("session_id") or "").strip()
+        if not session_id:
+            return {"ok": False, "error": "desktop_session_id is required."}
+        return libreoffice_desktop.get_manager().save(
+            session_id,
+            file_id=str(input.get("file_id") or ""),
+        )
+
+    def _desktop_sync(self, input: dict) -> dict:
+        return libreoffice_desktop.get_manager().sync(
+            session_id=str(input.get("desktop_session_id") or input.get("session_id") or ""),
+            file_id=str(input.get("file_id") or ""),
+        )
 
     def _origin(self, request: Request) -> str:
         origin = request.headers.get("Origin") or request.host_url.rstrip("/")
         return origin.rstrip("/")
 
-    async def _discover(self) -> dict:
-        for url in DISCOVERY_URLS:
-            try:
-                async with httpx.AsyncClient(timeout=8.0) as client:
-                    response = await client.get(url)
-                if response.status_code == 200 and "wopi-discovery" in response.text.lower():
-                    return {"ok": True, "xml": response.text}
-            except Exception:
-                continue
-        return {"ok": False, "error": "Collabora discovery is not reachable yet"}
-
-    def _select_action(self, discovery_xml: str, extension: str, mode: str) -> str:
-        root = ET.fromstring(discovery_xml)
-        best = ""
-        fallback = ""
-        for action in root.findall(".//{*}action"):
-            if action.attrib.get("ext", "").lower() != extension.lower():
-                continue
-            name = action.attrib.get("name", "").lower()
-            urlsrc = action.attrib.get("urlsrc", "")
-            if not urlsrc:
-                continue
-            if name == mode:
-                best = urlsrc
-                break
-            if name == "view":
-                fallback = urlsrc
-        return best or fallback
-
-    def _same_origin_action(self, urlsrc: str, wopi_src: str, session_id: str) -> str:
-        parsed = urlparse(urlsrc)
-        path = parsed.path or "/office/browser/cool.html"
-        if not path.startswith("/office"):
-            path = "/office" + path
-        query = parsed.query
-        base = path + (f"?{query}" if query else ("?" if urlsrc.endswith("?") else ""))
-        separator = "" if base.endswith("?") or base.endswith("&") else ("&" if "?" in base else "?")
-        base = f"{base}{separator}a0_session={quote(session_id, safe='')}"
-        return f"{base}&WOPISrc={quote(wopi_src, safe='')}"
+def _public_doc(doc: dict) -> dict:
+    result = {
+        "file_id": doc["file_id"],
+        "path": document_store.display_path(doc["path"]),
+        "basename": doc["basename"],
+        "title": doc["basename"],
+        "extension": doc["extension"],
+        "size": doc["size"],
+        "version": document_store.item_version(doc),
+        "last_modified": doc["last_modified"],
+    }
+    for key in ("open_sessions", "last_opened_at", "session_expires_at"):
+        if key in doc:
+            result[key] = doc[key]
+    return result

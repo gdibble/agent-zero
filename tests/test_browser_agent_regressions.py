@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 import threading
 from pathlib import Path
@@ -92,6 +93,7 @@ from plugins._browser.helpers.extension_manager import (
     _normalize_chrome_prodversion,
     get_extensions_root,
     parse_chrome_web_store_extension_id,
+    uninstall_browser_extension,
 )
 import plugins._browser.helpers.extension_manager as browser_extension_manager_module
 from plugins._browser.helpers.runtime import (
@@ -289,6 +291,96 @@ def test_browser_extension_storage_uses_plugin_user_path(monkeypatch, tmp_path):
     assert get_extensions_root() == tmp_path / "usr" / "plugins" / "_browser" / "extensions"
 
 
+def test_browser_extension_manager_uninstalls_only_managed_extensions(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        browser_extension_manager_module.files,
+        "get_abs_path",
+        lambda *parts: str(tmp_path.joinpath(*parts)),
+    )
+    managed_extension = get_extensions_root() / "chrome-web-store" / ("a" * 32)
+    external_extension = tmp_path / "external-extension"
+    for extension_dir, name in (
+        (managed_extension, "Managed Extension"),
+        (external_extension, "External Extension"),
+    ):
+        extension_dir.mkdir(parents=True)
+        (extension_dir / "manifest.json").write_text(
+            json.dumps({"name": name, "version": "1.0.0"}),
+            encoding="utf-8",
+        )
+
+    saved_configs = []
+    monkeypatch.setattr(
+        browser_extension_manager_module,
+        "get_browser_config",
+        lambda: {
+            "extension_paths": [str(managed_extension), str(external_extension)],
+        },
+    )
+    monkeypatch.setattr(
+        browser_extension_manager_module.plugins,
+        "save_plugin_config",
+        lambda _plugin, _project, _agent, config: saved_configs.append(config.copy()),
+    )
+
+    entries = browser_extension_manager_module.list_browser_extensions()
+    managed_entry = next(item for item in entries if item["path"] == str(managed_extension))
+    external_entry = next(item for item in entries if item["path"] == str(external_extension))
+
+    assert managed_entry["can_delete"] is True
+    assert managed_entry["managed"] is True
+    assert external_entry["can_delete"] is False
+
+    result = uninstall_browser_extension(str(managed_extension))
+
+    assert result["name"] == "Managed Extension"
+    assert result["extension_paths"] == [str(external_extension)]
+    assert not managed_extension.exists()
+    assert external_extension.exists()
+    assert saved_configs[-1]["extension_paths"] == [str(external_extension)]
+
+    with pytest.raises(ValueError, match="Only Browser-managed"):
+        uninstall_browser_extension(str(external_extension))
+    assert external_extension.exists()
+
+
+def test_browser_extension_manager_exposes_openable_manifest_ui(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        browser_extension_manager_module.files,
+        "get_abs_path",
+        lambda *parts: str(tmp_path.joinpath(*parts)),
+    )
+    extension_dir = get_extensions_root() / "local-options"
+    extension_dir.mkdir(parents=True)
+    (extension_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": 3,
+                "name": "Openable Extension",
+                "version": "1.0.0",
+                "options_ui": {"page": "options/index.html"},
+                "action": {"default_popup": "popup.html"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        browser_extension_manager_module,
+        "get_browser_config",
+        lambda: {"extension_paths": [str(extension_dir)]},
+    )
+
+    entry = browser_extension_manager_module.list_browser_extensions()[0]
+    expected_id = browser_extension_manager_module._extension_id_from_path(extension_dir)
+
+    assert entry["id"] == expected_id
+    assert entry["has_ui"] is True
+    assert entry["open_label"] == "Options"
+    assert entry["open_url"] == f"chrome-extension://{expected_id}/options/index.html"
+    assert entry["ui"]["targets"][1]["url"] == f"chrome-extension://{expected_id}/popup.html"
+
+
 def test_browser_extension_manager_parses_web_store_urls():
     extension_id = "a" * 32
 
@@ -343,9 +435,13 @@ def test_browser_extension_menu_exposes_agent_and_url_paths():
     assert "Browser LLM Preset" in html
     assert "Chrome Extensions" in html
     assert "Installed extensions" in html
+    assert "deleteExtension(extension)" not in html
     assert "No extensions installed yet." not in html
     assert "Browser Extension Settings" not in html
     assert "<span>Settings</span>" in html
+    assert "extensionHasOpenUi(extension)" in html
+    assert "openExtensionUi(extension)" in html
+    assert "<span>Open</span>" in html
     assert "hasExtensionInstallUrl()" in html
     assert "malicious or buggy extensions" in html
     assert skill.exists()
@@ -539,17 +635,79 @@ def test_browser_entry_points_prefer_canvas_and_modal_dock_handoff():
     assert "releaseSurfaceBindings()" in browser_store
     assert "this.releaseSurfaceBindings();" in browser_store
 
-    for js in (tool_handler, after_loop_handler):
-        assert "async function openBrowserCanvas" in js
-        assert "openBrowserModal" not in js
-        assert js.index('await rightCanvasStore.open("browser", payload);') < js.index("if (window.ensureModalOpen)")
+    assert "async function openBrowserCanvas" in tool_handler
+    assert 'await rightCanvasStore.open("browser", payload);' in tool_handler
+    assert "window.ensureModalOpen" in tool_handler
+    assert "window.openModal" in tool_handler
+    assert "function syncOpenBrowserCanvas" in tool_handler
+    assert "async function syncOpenBrowserCanvas" in after_loop_handler
+    assert "syncBrowserResultsIntoOpenCanvas" in after_loop_handler
+    assert "window.ensureModalOpen" not in after_loop_handler
+    assert "window.openModal" not in after_loop_handler
 
-    assert "function autoOpenBrowserCanvas" in tool_handler
+    for js in (tool_handler, after_loop_handler):
+        assert "openBrowserModal" not in js
+        assert "isBrowserCanvasAlreadyOpen" in js
+        assert "rightCanvasStore?.isOpen" in js
+        assert 'rightCanvasStore?.activeSurfaceId === "browser"' in js
+        assert "autoOpenBrowserCanvas" not in js
+        assert "autoOpenedBrowsers" not in js
+        assert "syncedBrowserCanvases" in js
+        assert "const FOCUS_ACTIONS = new Set" in js
+        assert "FOCUS_ACTIONS.has(action)" in js
 
     for js in (tool_handler, after_loop_handler, register_js, browser_store, modals_js):
         assert "globalThis.Alpine" not in js
         assert "Alpine?.store" not in js
         assert "Alpine.store" not in js
+
+
+def test_browser_and_desktop_surface_buttons_remember_latest_window_mode():
+    canvas_store = (PROJECT_ROOT / "webui" / "components" / "canvas" / "right-canvas-store.js").read_text(
+        encoding="utf-8"
+    )
+    canvas_html = (PROJECT_ROOT / "webui" / "components" / "canvas" / "right-canvas.html").read_text(
+        encoding="utf-8"
+    )
+    modals_js = (PROJECT_ROOT / "webui" / "js" / "modals.js").read_text(encoding="utf-8")
+
+    assert "surfaceModes: {}" in canvas_store
+    assert "recordSurfaceMode(surfaceId" in canvas_store
+    assert "latestSurfaceMode(surfaceId)" in canvas_store
+    assert "async openLatest(surfaceId" in canvas_store
+    assert "async openModalSurface(surfaceId" in canvas_store
+    assert "this.recordSurfaceMode(targetId, SURFACE_MODE_CANVAS" in canvas_store
+    assert "this.recordSurfaceMode(targetId, SURFACE_MODE_MODAL)" in canvas_store
+    assert "surfaceModes: this.surfaceModes" in canvas_store
+    assert "normalizeSurfaceMode(mode)" in canvas_store
+
+    assert '@click="$store.rightCanvas.openLatest(surface.id)"' in canvas_html
+    assert '@click="$store.rightCanvas.open(surface.id)"' in canvas_html
+
+    assert 'rightCanvasStore.recordSurfaceMode?.(metadata.surfaceId, "modal")' in modals_js
+    assert "modalRequiresExplicitClose" in modals_js
+    assert '"plugins/_browser/webui/main.html"' in modals_js
+    assert '"plugins/_office/webui/main.html"' in modals_js
+    assert "&& !modalRequiresExplicitClose(newModal)" in modals_js
+    assert "if (modalRequiresExplicitClose(modalStack[modalStack.length - 1])) return;" in modals_js
+
+
+def test_browser_tool_does_not_auto_open_canvas_policy_is_documented():
+    prompt = (
+        PROJECT_ROOT / "plugins" / "_browser" / "prompts" / "agent.system.tool.browser.md"
+    ).read_text(encoding="utf-8")
+    config = (PROJECT_ROOT / "plugins" / "_browser" / "default_config.yaml").read_text(
+        encoding="utf-8"
+    )
+    config_html = (PROJECT_ROOT / "plugins" / "_browser" / "webui" / "config.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "must not open the right canvas automatically" in prompt
+    assert "Use the tool headlessly unless the user opens the Browser canvas" in prompt
+    assert "optional visible WebUI viewer" in prompt
+    assert "already open" in config
+    assert "already-open Browser canvas" in config_html
 
 
 def test_browser_canvas_uses_plain_panel_without_debug_probe():
@@ -608,9 +766,15 @@ def test_browser_extension_settings_stay_user_facing():
     config_html = (PROJECT_ROOT / "plugins" / "_browser" / "webui" / "config.html").read_text(
         encoding="utf-8"
     )
+    config_store = (
+        PROJECT_ROOT / "plugins" / "_browser" / "webui" / "browser-config-store.js"
+    ).read_text(encoding="utf-8")
 
     assert "Choose which installed Chrome extensions Browser loads." in config_html
     assert "Installed extensions" in config_html
+    assert "extensionDeleteTitle(extension)" in config_html
+    assert "deleteExtension(extension)" in config_html
+    assert "Delete extension" in config_store
     assert "<textarea" not in config_html
     assert "Enabled extension directories" not in config_html
     assert "Chrome Web Store URL installs" not in config_html
@@ -756,11 +920,15 @@ def test_browser_annotate_mode_ui_and_prompt_hooks():
     assert "Annotating" in panel_html
     assert "browser-annotation-layer" in panel_html
     assert "browser-annotation-tray" in panel_html
+    assert "annotationTrayStyle()" in panel_html
+    assert "startAnnotationTrayDrag($event)" in panel_html
     assert "Draft to chat" in panel_html
     assert "Send now" in panel_html
     assert "@pointerdown.stop.prevent=\"$store.browserPage.startAnnotationSelection($event)\"" in panel_html
     assert "@keydown.window=\"$store.browserPage.handleKeydown($event)\"" in panel_html
     assert "annotationComments: []" in browser_store
+    assert "annotationTrayPosition: null" in browser_store
+    assert "clampAnnotationTrayPosition" in browser_store
     assert '"browser_viewer_annotation"' in browser_store
     assert 'event?.key === "." && (event.metaKey || event.ctrlKey)' in browser_store
     assert "Browser annotations" in browser_store
@@ -769,6 +937,41 @@ def test_browser_annotate_mode_ui_and_prompt_hooks():
     assert "Selector:" in browser_store
     assert "DOM:" in browser_store
     assert "value=\\\"[redacted]\\\"" in browser_store
+
+
+def test_browser_visual_mode_bridges_clipboard_shortcuts():
+    browser_store = (
+        PROJECT_ROOT / "plugins" / "_browser" / "webui" / "browser-store.js"
+    ).read_text(encoding="utf-8")
+    runtime = (
+        PROJECT_ROOT / "plugins" / "_browser" / "helpers" / "runtime.py"
+    ).read_text(encoding="utf-8")
+    ws_browser = (
+        PROJECT_ROOT / "plugins" / "_browser" / "api" / "ws_browser.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'import { copyToClipboard } from "/components/messages/action-buttons/simple-action-buttons.js";' in browser_store
+    assert "BROWSER_VISUAL_SHORTCUT_KEYS" in browser_store
+    assert "handleVisualBrowserShortcut(event)" in browser_store
+    assert "visualBrowserStageForEvent(event)" in browser_store
+    assert "isLocalEditableTarget(event?.target)" in browser_store
+    assert 'return { action: "paste" };' in browser_store
+    assert 'return { action: "copy" };' in browser_store
+    assert 'return { action: "cut" };' in browser_store
+    assert 'return { key: "Control+A" };' in browser_store
+    assert 'return { key: shift ? "Control+Shift+Z" : "Control+Z" };' in browser_store
+    assert 'input_type: "clipboard"' in browser_store
+    assert "pasteHostClipboardToBrowser()" in browser_store
+    assert "copyBrowserClipboardToHost" in browser_store
+    assert "Browser paste needs clipboard permission in this tab." in browser_store
+
+    assert "CLIPBOARD_BRIDGE_SCRIPT" in runtime
+    assert "async def clipboard" in runtime
+    assert "insertFromPaste" in runtime
+    assert "deleteByCut" in runtime
+    assert "keyboard.insert_text" in runtime
+    assert 'input_type == "clipboard"' in ws_browser
+    assert 'runtime.call(\n                    "clipboard"' in ws_browser
 
 
 def test_browser_runtime_and_content_helper_expose_annotation_target():
@@ -783,8 +986,17 @@ def test_browser_runtime_and_content_helper_expose_annotation_target():
     assert "globalThis.__spaceBrowserPageContent__.annotate(payload || null)" in runtime
     assert "function annotate(payload = null)" in helper
     assert "annotate," in helper
+    assert "boundingBoxFor," in helper
     assert "sanitizeAnnotationDom" in helper
     assert "password" in helper
+
+
+def test_browser_runtime_requires_current_content_helper_for_modifier_clicks():
+    runtime = (
+        PROJECT_ROOT / "plugins" / "_browser" / "helpers" / "runtime.py"
+    ).read_text(encoding="utf-8")
+
+    assert "__spaceBrowserPageContent__?.boundingBoxFor" in runtime
 
 
 @pytest.mark.anyio
@@ -960,6 +1172,57 @@ def test_browser_runtime_removes_stale_profile_singletons(monkeypatch, tmp_path)
         (core.profile_dir / name).exists() or (core.profile_dir / name).is_symlink()
         for name in ("SingletonLock", "SingletonCookie", "SingletonSocket")
     )
+
+
+@pytest.mark.anyio
+async def test_browser_runtime_restarts_when_cached_context_is_stale():
+    starts = []
+    stopped = []
+
+    class StaleContext:
+        @property
+        def pages(self):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    class LiveContext:
+        pages = []
+
+    class FakePlaywright:
+        async def stop(self):
+            stopped.append(True)
+
+    core = _BrowserRuntimeCore("ctx")
+    core.context = StaleContext()
+    core.playwright = FakePlaywright()
+    core.pages[4] = browser_runtime_module.BrowserPage(id=4, page=object())
+    core.last_interacted_browser_id = 4
+
+    async def fake_start():
+        starts.append(True)
+        core.context = LiveContext()
+
+    core._start = fake_start
+
+    await core.ensure_started()
+
+    assert starts == [True]
+    assert stopped == [True]
+    assert isinstance(core.context, LiveContext)
+    assert core.pages == {}
+    assert core.last_interacted_browser_id is None
+
+
+def test_browser_runtime_context_close_event_clears_cached_state():
+    core = _BrowserRuntimeCore("ctx")
+    core.context = object()
+    core.pages[4] = browser_runtime_module.BrowserPage(id=4, page=object())
+    core.last_interacted_browser_id = 4
+
+    core._on_context_closed()
+
+    assert core.context is None
+    assert core.pages == {}
+    assert core.last_interacted_browser_id is None
 
 
 def test_browser_save_plugin_config_restarts_runtimes_on_change(monkeypatch, tmp_path):
@@ -1352,6 +1615,100 @@ async def test_browser_runtime_remounts_initial_changed_viewport():
 
 
 @pytest.mark.anyio
+async def test_browser_runtime_clipboard_paste_uses_dom_bridge():
+    eval_payloads = []
+    settled = []
+
+    class FakeKeyboard:
+        def __init__(self):
+            self.inserted = []
+
+        async def insert_text(self, text):
+            self.inserted.append(text)
+
+    class FakePage:
+        url = "about:blank"
+
+        def __init__(self):
+            self.keyboard = FakeKeyboard()
+
+        async def evaluate(self, script, payload=None):
+            if payload is not None:
+                eval_payloads.append((script, payload))
+                return {
+                    "action": "paste",
+                    "text": payload["text"],
+                    "changed": True,
+                    "default_prevented": False,
+                }
+            return 1
+
+        async def title(self):
+            return "Blank"
+
+    page = FakePage()
+    core = _BrowserRuntimeCore("ctx")
+    core.context = object()
+    core.pages[7] = browser_runtime_module.BrowserPage(id=7, page=page)
+
+    async def fake_settle(_page, short=False):
+        settled.append(short)
+
+    core._settle = fake_settle
+
+    result = await core.clipboard(7, action="paste", text="hello")
+
+    assert result["state"]["id"] == 7
+    assert result["clipboard"]["changed"] is True
+    assert result["clipboard"]["text"] == "hello"
+    assert eval_payloads[0][1] == {"action": "paste", "text": "hello"}
+    assert "insertFromPaste" in eval_payloads[0][0]
+    assert page.keyboard.inserted == []
+    assert settled == [True]
+
+
+@pytest.mark.anyio
+async def test_browser_runtime_clipboard_paste_falls_back_to_keyboard_insert_text():
+    class FakeKeyboard:
+        def __init__(self):
+            self.inserted = []
+
+        async def insert_text(self, text):
+            self.inserted.append(text)
+
+    class FakePage:
+        url = "about:blank"
+
+        def __init__(self):
+            self.keyboard = FakeKeyboard()
+
+        async def evaluate(self, script, payload=None):
+            if payload is not None:
+                return {
+                    "action": "paste",
+                    "text": payload["text"],
+                    "changed": False,
+                    "default_prevented": False,
+                }
+            return 1
+
+        async def title(self):
+            return "Blank"
+
+    page = FakePage()
+    core = _BrowserRuntimeCore("ctx")
+    core.context = object()
+    core.pages[7] = browser_runtime_module.BrowserPage(id=7, page=page)
+    core._settle = lambda _page, short=False: asyncio.sleep(0)
+
+    result = await core.clipboard(7, action="paste", text="hello")
+
+    assert result["clipboard"]["changed"] is True
+    assert result["clipboard"]["method"] == "keyboard.insert_text"
+    assert page.keyboard.inserted == ["hello"]
+
+
+@pytest.mark.anyio
 async def test_browser_viewer_wheel_input_dispatches_scroll(monkeypatch):
     calls = []
 
@@ -1392,6 +1749,54 @@ async def test_browser_viewer_wheel_input_dispatches_scroll(monkeypatch):
         "snapshot": None,
     }
     assert calls == [("wheel", (3, 320.0, 480.0, 0.0, 640.0), {})]
+
+
+@pytest.mark.anyio
+async def test_browser_viewer_clipboard_input_dispatches_runtime(monkeypatch):
+    calls = []
+    clipboard = {"action": "paste", "text": "hello", "changed": True}
+
+    class FakeRuntime:
+        async def call(self, method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            return {
+                "state": {"id": args[0], "currentUrl": "about:blank"},
+                "clipboard": clipboard,
+            }
+
+    async def fake_get_runtime(context_id, create=True):
+        assert context_id == "ctx"
+        assert create is False
+        return FakeRuntime()
+
+    monkeypatch.setattr(ws_browser_module, "get_runtime", fake_get_runtime)
+
+    handler = ws_browser_module.WsBrowser(
+        SimpleNamespace(),
+        threading.RLock(),
+        manager=None,
+    )
+
+    result = await handler.process(
+        "browser_viewer_input",
+        {
+            "context_id": "ctx",
+            "browser_id": 3,
+            "input_type": "clipboard",
+            "action": "paste",
+            "text": "hello",
+        },
+        "sid-1",
+    )
+
+    assert result == {
+        "state": {"id": 3, "currentUrl": "about:blank"},
+        "clipboard": clipboard,
+        "snapshot": None,
+    }
+    assert calls == [
+        ("clipboard", (3,), {"action": "paste", "text": "hello"})
+    ]
 
 
 @pytest.mark.anyio
@@ -1447,6 +1852,33 @@ async def test_browser_viewer_annotation_dispatches_runtime(monkeypatch):
         "viewer_id": "viewer-1",
     }
     assert calls == [("annotation_target", (4, payload), {})]
+
+
+def test_browser_runtime_normalizes_multi_group_ids_and_modifiers():
+    core = _BrowserRuntimeCore("ctx")
+
+    assert core._multi_group_key({"browser_id": 7}) == 7
+    assert core._multi_group_key({"browser_id": "7"}) == 7
+    assert core._multi_group_key({"browser_id": "browser-7"}) == 7
+    assert core._multi_group_key({"browser_id": ""}) is None
+    assert core._normalize_modifiers("Control") == ["Control"]
+    assert core._normalize_modifiers(["Control", " Shift "]) == ["Control", "Shift"]
+    assert core._normalize_modifiers([]) is None
+
+    with pytest.raises(ValueError):
+        core._normalize_modifiers("Ctrl")
+
+
+def test_browser_runtime_background_focus_restores_previous_active_tab():
+    core = _BrowserRuntimeCore("ctx")
+    core.pages[1] = browser_runtime_module.BrowserPage(id=1, page=object())
+    core.pages[2] = browser_runtime_module.BrowserPage(id=2, page=object())
+
+    assert core._background_focus_target(previous_focus=1, fallback_id=2) == 1
+
+    core.pages.pop(1)
+
+    assert core._background_focus_target(previous_focus=1, fallback_id=2) == 2
 
 
 def test_browser_cleanup_extensions_follow_extensible_path_layout():
