@@ -36,18 +36,7 @@
                         </div>
                     </template>
 
-                    <div class="project-detail-inline-section">
-                        <div class="project-detail-header">
-                            <span class="projects-project-card-title">LLM</span>
-                        </div>
-                        <x-component path="projects/project-edit-llm.html">
-                        </x-component>
-                    </div>
-
                     <div class="buttons-right">
-                        <button type="button" class="button cancel"
-                            @click="$store.projects.cancelCreate()"
-                            :disabled="$store.projects.selectedProject._cloning">Cancel</button>
                         <button type="button" class="button confirm" 
                             @click="$store.projects.confirmCreate()"
                             :disabled="$store.projects.selectedProject._cloning">
@@ -61,6 +50,9 @@
                                 <span x-text="$store.projects.selectedProject.git_url ? 'Clone and continue' : 'Create and continue'"></span>
                             </template>
                         </button>
+                        <button type="button" class="button cancel"
+                            @click="$store.projects.cancelCreate()"
+                            :disabled="$store.projects.selectedProject._cloning">Cancel</button>
                     </div>
                 </div>
 
@@ -80,12 +72,6 @@
 
     .project-detail-header {
         margin-bottom: 1em;
-    }
-
-    .project-detail-inline-section {
-        border-top: 1px solid var(--color-border);
-        margin-top: 1em;
-        padding-top: 1em;
     }
 
     .button-loading {

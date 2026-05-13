@@ -2,19 +2,23 @@
 file read write patch with numbered lines
 not code execution rejects binary
 terminal (grep find sed) advance search/replace
+actions: read write patch
+common args: action path
 
-#### text_editor:read
+#### read
 read file with numbered lines
 args path line_from line_to (inclusive optional)
-no range → first {{default_line_count}} lines
+no range -> first {{default_line_count}} lines
 long lines cropped output may trim by token limit
 read surrounding context before patching
 usage:
 ~~~json
 {
-    ...
-    "tool_name": "text_editor:read",
+    "thoughts": ["I need file context before editing."],
+    "headline": "Reading file",
+    "tool_name": "text_editor",
     "tool_args": {
+        "action": "read",
         "path": "/path/file.py",
         "line_from": 1,
         "line_to": 50
@@ -22,24 +26,28 @@ usage:
 }
 ~~~
 
-#### text_editor:write
+#### write
 create/overwrite file auto-creates dirs
 args path content
 usage:
 ~~~json
 {
-    ...
-    "tool_name": "text_editor:write",
+    "thoughts": ["I need to create or replace the file content."],
+    "headline": "Writing file",
+    "tool_name": "text_editor",
     "tool_args": {
+        "action": "write",
         "path": "/path/file.py",
         "content": "import os\nprint('hello')\n"
     }
 }
 ~~~
 
-#### text_editor:patch
-edit existing file. prefer patch_text; use edits only right after read for tiny line edits
-args path plus exactly one of: patch_text string OR edits [{from to content}]
+#### patch
+edit existing file. prefer exact replace for simple "change X to Y"; use patch_text for context changes; use edits only right after read for tiny line edits
+if the user says patch, change without rewriting, or don't rewrite, use action patch instead of write
+args path plus exactly one of: old_text+new_text OR patch_text string OR edits [{from to content}]
+exact replace: `old_text` must be the exact current text span and must match once; `new_text` is the replacement
 patch_text uses current file content, no prior read required
 patch_text update-only forms:
 - insert after anchor: @@ exact existing line then +new lines
@@ -54,11 +62,14 @@ ensure valid syntax in content (all braces brackets tags closed)
 usage:
 ~~~json
 {
-    ...
-    "tool_name": "text_editor:patch",
+    "thoughts": ["I can replace one exact current string without rewriting the whole file."],
+    "headline": "Patching file",
+    "tool_name": "text_editor",
     "tool_args": {
+        "action": "patch",
         "path": "/path/file.py",
-        "patch_text": "*** Begin Patch\n*** Update File: file.py\n@@ def run():\n+    print('ready')\n*** End Patch"
+        "old_text": "status = 'draft'",
+        "new_text": "status = 'ready'"
     }
 }
 ~~~

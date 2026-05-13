@@ -173,9 +173,9 @@
             </button>
           </div>
 
-          <form class="browser-address-form" @submit.prevent="$store.browserPage.go()">
+          <form class="browser-address-form" aria-label="Browser navigation" @submit.prevent="$store.browserPage.go()">
             <span class="material-symbols-outlined browser-address-icon">language</span>
-	            <input class="browser-address" x-model="$store.browserPage.address"
+	            <input class="browser-address" aria-label="Browser address" name="browser_address" x-model="$store.browserPage.address"
 	              @focus="$store.browserPage.onAddressFocus()" @blur="$store.browserPage.onAddressBlur()"
 	              :disabled="$store.browserPage.isBusy()"
 	              placeholder="https://example.com" autocomplete="off" />
@@ -305,6 +305,17 @@
       border-radius: 7px;
       box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
       background: color-mix(in srgb, var(--color-background) 94%, #000 6%);
+    }
+
+    .modal-inner.browser-modal.is-focus-mode {
+      resize: none;
+      border-radius: 6px;
+    }
+
+    .modal-inner.browser-modal.is-focus-mode .browser-modal-focus-button {
+      color: var(--color-text);
+      border-color: color-mix(in srgb, var(--color-primary) 42%, var(--color-border));
+      background: color-mix(in srgb, var(--color-primary) 16%, var(--color-background));
     }
 
     .modal.modal-floating {

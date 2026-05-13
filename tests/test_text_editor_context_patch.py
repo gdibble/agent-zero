@@ -14,8 +14,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from plugins._text_editor.helpers.context_patch import ContextPatchError
-from plugins._text_editor.helpers.file_ops import apply_context_patch_file
-from plugins._text_editor.helpers.patch_request import parse_patch_request
+from plugins._text_editor.helpers.file_ops import (
+    apply_context_patch_file,
+    apply_exact_replace_file,
+)
+from plugins._text_editor.helpers.patch_request import (
+    exact_replace_to_patch_text,
+    parse_patch_request,
+)
 from plugins._text_editor.helpers.patch_state import (
     LOCAL_FRESHNESS_KEY,
     REMOTE_FRESHNESS_KEY,
@@ -98,6 +104,41 @@ def test_context_patch_replaces_matching_context(tmp_path: Path) -> None:
 
     assert result["line_from"] == 2
     assert target.read_text(encoding="utf-8") == "alpha\nbeta\ndelta\n"
+
+
+def test_exact_replace_file_replaces_one_span(tmp_path: Path) -> None:
+    target = tmp_path / "sample.txt"
+    target.write_text("alpha\nstatus = draft\ngamma\n", encoding="utf-8")
+
+    result = apply_exact_replace_file(
+        str(target), "status = draft", "status = ready"
+    )
+
+    assert result["replacement_count"] == 1
+    assert result["line_from"] == 2
+    assert target.read_text(encoding="utf-8") == "alpha\nstatus = ready\ngamma\n"
+
+
+def test_exact_replace_file_rejects_ambiguous_match(tmp_path: Path) -> None:
+    target = tmp_path / "sample.txt"
+    target.write_text("alpha\nalpha\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="matched 2 times"):
+        apply_exact_replace_file(str(target), "alpha", "beta")
+
+    assert target.read_text(encoding="utf-8") == "alpha\nalpha\n"
+
+
+def test_exact_replace_to_patch_text_works_with_context_patch(tmp_path: Path) -> None:
+    target = tmp_path / "sample.txt"
+    target.write_text("alpha\nstatus = draft\ngamma\n", encoding="utf-8")
+
+    patch_text = exact_replace_to_patch_text(
+        "sample.txt", "status = draft", "status = ready"
+    )
+    apply_context_patch_file(str(target), patch_text)
+
+    assert target.read_text(encoding="utf-8") == "alpha\nstatus = ready\ngamma\n"
 
 
 def test_context_patch_replaces_when_anchor_is_target_line(
@@ -211,7 +252,7 @@ def test_patch_request_rejects_edits_and_patch_text_together() -> None:
     )
 
     assert request is None
-    assert err == "provide either edits or patch_text, not both"
+    assert err == "provide exactly one patch form: edits, patch_text, or old_text/new_text"
 
 
 def test_patch_request_rejects_empty_patch_text() -> None:
@@ -219,6 +260,21 @@ def test_patch_request_rejects_empty_patch_text() -> None:
 
     assert request is None
     assert err == "patch_text must not be empty"
+
+
+def test_patch_request_accepts_exact_replace() -> None:
+    request, err = parse_patch_request(
+        None,
+        None,
+        old_text="status = draft",
+        new_text="status = ready",
+    )
+
+    assert err == ""
+    assert request is not None
+    assert request.mode == "replace"
+    assert request.old_text == "status = draft"
+    assert request.new_text == "status = ready"
 
 
 def test_patch_state_records_and_checks_fresh_file_state() -> None:
@@ -327,6 +383,11 @@ class _FakeAgent:
         self.data = {}
 
     def read_prompt(self, name: str, **kwargs) -> str:
+        if name.endswith("read_ok.md"):
+            return (
+                f"{kwargs['path']} read {kwargs['total_lines']} lines\n"
+                f">>>\n{kwargs['content']}\n<<<"
+            )
         if name.endswith("patch_ok.md"):
             return (
                 f"{kwargs['path']} patched {kwargs['edit_count']} edits applied "
@@ -341,6 +402,7 @@ class _FakeAgent:
 
 def _load_text_editor_tool(monkeypatch: pytest.MonkeyPatch):
     calls: list[tuple[str, dict | None]] = []
+    import helpers
 
     tool_stub = types.ModuleType("helpers.tool")
     tool_stub.Tool = _FakeTool
@@ -370,6 +432,9 @@ def _load_text_editor_tool(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "helpers.extension", extension_stub)
     monkeypatch.setitem(sys.modules, "helpers.plugins", plugins_stub)
     monkeypatch.setitem(sys.modules, "helpers.runtime", runtime_stub)
+    monkeypatch.setattr(helpers, "extension", extension_stub, raising=False)
+    monkeypatch.setattr(helpers, "plugins", plugins_stub, raising=False)
+    monkeypatch.setattr(helpers, "runtime", runtime_stub, raising=False)
     sys.modules.pop("plugins._text_editor.tools.text_editor", None)
     module = importlib.import_module("plugins._text_editor.tools.text_editor")
     return module, calls
@@ -426,6 +491,66 @@ def test_text_editor_patch_text_does_not_require_prior_read(
     assert calls[1][1]["mode"] == "patch_text"
 
 
+def test_text_editor_exact_replace_does_not_require_prior_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, calls = _load_text_editor_tool(monkeypatch)
+    target = tmp_path / "sample.txt"
+    target.write_text("line-1\nstatus = draft\nline-3\n", encoding="utf-8")
+    agent = _FakeAgent()
+    tool = module.TextEditor(agent, "text_editor", "patch", {}, "", None)
+
+    response = asyncio.run(
+        tool._patch(
+            path=str(target),
+            old_text="status = draft",
+            new_text="status = ready",
+        )
+    )
+
+    assert "patched 1 edits applied 3 lines now" in response.message
+    assert "status = ready" in response.message
+    assert target.read_text(encoding="utf-8") == "line-1\nstatus = ready\nline-3\n"
+    realpath = os.path.realpath(target)
+    assert agent.data[module._MTIME_KEY][realpath] == {
+        "mtime": 0,
+        "total_lines": 0,
+    }
+    assert calls[0] == (
+        "text_editor_patch_before",
+        {
+            "path": str(target),
+            "old_text": "status = draft",
+            "new_text": "status = ready",
+            "edits": [],
+            "mode": "replace",
+        },
+    )
+    assert calls[1][0] == "text_editor_patch_after"
+    assert calls[1][1]["mode"] == "replace"
+
+
+def test_text_editor_execute_accepts_action_alias_for_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _calls = _load_text_editor_tool(monkeypatch)
+    target = tmp_path / "sample.txt"
+    target.write_text("line-1\nline-2\n", encoding="utf-8")
+    tool = module.TextEditor(
+        _FakeAgent(),
+        "text_editor",
+        None,
+        {"action": "read", "path": str(target), "line_from": 1, "line_to": 1},
+        "",
+        None,
+    )
+
+    response = asyncio.run(tool.execute(**tool.args))
+
+    assert "read 2 lines" in response.message
+    assert "line-1" in response.message
+
+
 def test_text_editor_patch_text_rejects_simultaneous_edits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -442,7 +567,7 @@ def test_text_editor_patch_text_rejects_simultaneous_edits(
         )
     )
 
-    assert "provide either edits or patch_text" in response.message
+    assert "provide exactly one patch form" in response.message
     assert target.read_text(encoding="utf-8") == "line-1\n"
 
 

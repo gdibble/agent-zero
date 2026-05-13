@@ -16,9 +16,73 @@
         x-destroy="$store.browserConfig.cleanup()"
       >
         <div class="browser-config-card">
+          <div class="section-title">Host Browser</div>
+          <div class="section-description">
+            Use Chrome, Edge, or Chromium on this computer. Keep A0 CLI connected; the browser opens when the agent first needs it.
+          </div>
+
+          <label class="browser-config-field">
+            <span class="browser-config-field-label">Browser location</span>
+            <select x-model="$store.browserConfig.config.runtime_backend">
+              <option value="container">Docker browser</option>
+              <option value="host_required">Bring Your Own Browser</option>
+            </select>
+            <span
+              class="browser-config-field-help"
+              x-show="$store.browserConfig.config.runtime_backend === 'host_required'"
+            >
+              Use Google Chrome or a Chromium family browser. Visit chrome://inspect/#remote-debugging and enable "Allow remote debugging".
+            </span>
+          </label>
+
+          <label
+            class="browser-config-field"
+            x-show="$store.browserConfig.config.runtime_backend === 'host_required'"
+          >
+            <span class="browser-config-field-label">Host browser profile</span>
+            <select x-model="$store.browserConfig.config.host_browser_profile_mode">
+              <option value="existing">Existing browser profile</option>
+              <option value="agent">Clean Agent profile</option>
+            </select>
+            <span
+              class="browser-config-field-help"
+              x-show="$store.browserConfig.config.host_browser_profile_mode === 'agent'"
+            >
+              Uses a separate A0-controlled local profile on this computer.
+            </span>
+          </label>
+
+          <div
+            class="browser-config-warning"
+            x-show="$store.browserConfig.config.runtime_backend === 'host_required' && $store.browserConfig.config.host_browser_profile_mode !== 'agent'"
+          >
+            <span class="material-symbols-outlined">warning</span>
+            <span>
+              Existing profile lets the agent interact with the browser instance you authorize,
+              including signed-in sites, cookies, tabs, downloads, and page content.
+            </span>
+          </div>
+
+          <label class="browser-config-field">
+            <span class="browser-config-field-label">Page content access</span>
+            <select x-model="$store.browserConfig.config.host_browser_privacy_policy">
+              <option value="enforce_local">Local models only</option>
+              <option value="warn">Warn when using cloud</option>
+              <option value="allow">Allow</option>
+            </select>
+            <span class="browser-config-field-help">Controls page text and screenshots from the host browser.</span>
+          </label>
+
+          <div class="browser-config-note">
+            <span class="material-symbols-outlined" :class="{ spinning: $store.browserConfig.hostBrowserStatusLoading }" x-text="$store.browserConfig.hostBrowserStatusLoading ? 'progress_activity' : 'captive_portal'"></span>
+            <span x-text="$store.browserConfig.hostBrowserConnectorLabel()"></span>
+          </div>
+        </div>
+
+        <div class="browser-config-card">
           <div class="section-title">Browsing</div>
           <div class="section-description">
-            Set how new Browser sessions start and how an already-open Browser canvas follows agent activity.
+            Set how new Browser sessions start and how an already-open Browser surface follows agent activity.
           </div>
 
           <label class="browser-config-field">
@@ -34,7 +98,7 @@
           <label class="browser-config-switch-row">
             <span class="browser-config-switch-copy">
               <span class="browser-config-field-label">Autofocus active page</span>
-              <span class="browser-config-field-help">Update the visible Browser canvas for pages opened or changed by Browser tool results.</span>
+              <span class="browser-config-field-help">Update the visible Browser surface for pages opened or changed by Browser tool results.</span>
             </span>
             <span class="browser-config-toggle-with-label">
               <span class="browser-config-toggle-label" x-text="$store.browserConfig.autofocusLabel()"></span>
@@ -160,7 +224,8 @@
       line-height: 1.35;
     }
 
-    .browser-config-field input[type="text"] {
+    .browser-config-field input[type="text"],
+    .browser-config-field select {
       width: 100%;
       min-height: 36px;
       padding: 7px 10px;

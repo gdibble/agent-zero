@@ -18,11 +18,15 @@ from plugins._a0_connector.helpers.text_editor_freshness import (
 )
 from plugins._a0_connector.helpers.ws_runtime import (
     clear_pending_file_op,
+    remote_file_metadata_for_sid,
+    remote_tool_sids_for_context,
     select_remote_file_target_sid,
     store_pending_file_op,
-    subscribed_sids_for_context,
 )
-from plugins._text_editor.helpers.patch_request import parse_patch_request
+from plugins._text_editor.helpers.patch_request import (
+    exact_replace_to_patch_text,
+    parse_patch_request,
+)
 
 
 FILE_OP_TIMEOUT = 30.0
@@ -37,15 +41,23 @@ class TextEditorRemote(Tool):
     """Send file-editing operations to the connected CLI machine."""
 
     async def execute(self, **kwargs: Any) -> Response:
-        op = str(self.args.get("op") or self.args.get("operation", "")).strip().lower()
+        op = (
+            str(
+                self.args.get("action")
+                or ""
+            )
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
         if not op:
             return Response(
-                message="op is required (read, write, or patch)",
+                message="action is required (read, write, or patch)",
                 break_loop=False,
             )
         if op not in {"read", "write", "patch"}:
             return Response(
-                message=f"Unknown operation: {op!r}. Use read, write, or patch.",
+                message=f"Unknown action: {op!r}. Use read, write, or patch.",
                 break_loop=False,
             )
 
@@ -74,7 +86,12 @@ class TextEditorRemote(Tool):
             patch_request, err = parse_patch_request(
                 self.args.get("edits"),
                 self.args.get("patch_text"),
-                both_error="provide either edits or patch_text for patch, not both",
+                self.args.get("old_text"),
+                self.args.get("new_text"),
+                both_error=(
+                    "provide exactly one patch form: edits, patch_text, "
+                    "or old_text/new_text"
+                ),
             )
             if err:
                 return Response(
@@ -84,6 +101,13 @@ class TextEditorRemote(Tool):
             if patch_request and patch_request.mode == "patch_text":
                 result = await self._execute_context_patch(
                     path, patch_request.patch_text
+                )
+            elif patch_request and patch_request.mode == "replace":
+                result = await self._execute_context_patch(
+                    path,
+                    exact_replace_to_patch_text(
+                        path, patch_request.old_text, patch_request.new_text
+                    ),
                 )
             else:
                 result = await self._execute_patch(
@@ -150,23 +174,30 @@ class TextEditorRemote(Tool):
     ) -> dict[str, Any]:
         context_id = self.agent.context.id
         require_writes = op in {"write", "patch"}
-        subscribers = subscribed_sids_for_context(context_id)
+        candidates = remote_tool_sids_for_context(context_id)
         sid = select_remote_file_target_sid(context_id, require_writes=require_writes)
         if not sid:
-            if not subscribers:
+            if not candidates:
                 error = (
-                    "text_editor_remote: no CLI client connected to this context. "
-                    "Make sure the CLI is connected and subscribed."
+                    "text_editor_remote: no CLI client connected to Agent Zero. "
+                    "Make sure the CLI is connected to this instance."
                 )
             elif require_writes:
+                write_blocked = any(
+                    (metadata := remote_file_metadata_for_sid(candidate_sid))
+                    and metadata.get("enabled", True)
+                    and not metadata.get("write_enabled")
+                    for candidate_sid in candidates
+                )
                 error = (
-                    "text_editor_remote: no subscribed CLI in this context currently allows "
-                    "remote file writes. Press F3 to switch the CLI to Read&Write."
+                    "text_editor_remote: no connected CLI currently allows remote file writes. "
+                    "Press F3 to switch the CLI to Read&Write."
+                    if write_blocked
+                    else "text_editor_remote: no connected CLI currently advertises remote file access."
                 )
             else:
                 error = (
-                    "text_editor_remote: no subscribed CLI in this context currently advertises "
-                    "remote file access."
+                    "text_editor_remote: no connected CLI currently advertises remote file access."
                 )
             return {
                 "ok": False,

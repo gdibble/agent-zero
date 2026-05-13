@@ -8,6 +8,15 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_HELPER_PATH = PROJECT_ROOT / "helpers" / "skills.py"
+HELPER_STUB_MODULES = (
+    "helpers",
+    "helpers.files",
+    "helpers.projects",
+    "helpers.plugins",
+    "helpers.subagents",
+    "helpers.file_tree",
+    "helpers.runtime",
+)
 
 
 def _register_helpers_stubs():
@@ -61,13 +70,22 @@ def _register_helpers_stubs():
 
 
 def _load_skills_helper_module():
+    missing = object()
+    original_modules = {name: sys.modules.get(name, missing) for name in HELPER_STUB_MODULES}
     _register_helpers_stubs()
-    spec = importlib.util.spec_from_file_location("test_skills_helper_module", SKILLS_HELPER_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    try:
+        spec = importlib.util.spec_from_file_location("test_skills_helper_module", SKILLS_HELPER_PATH)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for name, original in original_modules.items():
+            if original is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
 
 
 runtime = _load_skills_helper_module()
@@ -180,27 +198,119 @@ def test_reactivating_name_only_scope_default_by_path_clears_hidden_override(mon
 def test_loaded_skill_entries_come_from_agent_data():
     agent = DummyAgent()
     agent.data[runtime.AGENT_DATA_NAME_LOADED_SKILLS] = [
-        "computer-use-remote",
+        "host-computer-use",
         "",
         "a0-development",
     ]
 
     assert runtime.get_loaded_skill_entries(agent) == [
-        {"name": "computer-use-remote"},
+        {"name": "host-computer-use"},
         {"name": "a0-development"},
     ]
+
+
+def test_skill_runtime_does_not_alias_old_office_skill_references():
+    entries = runtime.normalize_active_skills(
+        [
+            "office-artifacts",
+            {"name": "word-documents"},
+            {"path": "/a0/plugins/_office/skills/excel-workbooks"},
+            {"name": "Desktop", "path": "/a0/plugins/_office/skills/linux-desktop"},
+            "presentation-decks",
+        ]
+    )
+
+    assert entries == [
+        {"name": "office-artifacts"},
+        {"name": "word-documents"},
+        {"path": "/a0/plugins/_office/skills/excel-workbooks"},
+        {"name": "Desktop", "path": "/a0/plugins/_office/skills/linux-desktop"},
+        {"name": "presentation-decks"},
+    ]
+
+    agent = DummyAgent()
+    agent.data[runtime.AGENT_DATA_NAME_LOADED_SKILLS] = [
+        "office-artifacts",
+        "word-documents",
+        "excel-workbooks",
+        "presentation-decks",
+    ]
+
+    assert runtime.get_loaded_skill_entries(agent) == [
+        {"name": "office-artifacts"},
+        {"name": "word-documents"},
+        {"name": "excel-workbooks"},
+        {"name": "presentation-decks"},
+    ]
+
+    assert runtime.unload_agent_skill(agent, {"name": "office-artifacts"}) is True
+    assert agent.data[runtime.AGENT_DATA_NAME_LOADED_SKILLS] == [
+        "word-documents",
+        "excel-workbooks",
+        "presentation-decks",
+    ]
+
+
+def test_builtin_plugin_skill_delete_is_rejected_before_filesystem_delete():
+    with pytest.raises(PermissionError, match="Built-in plugin skills cannot be deleted"):
+        runtime.delete_skill("/a0/plugins/_office/skills/document-artifacts")
+
+
+def test_invalid_skill_frontmatter_reports_yaml_errors():
+    frontmatter, errors = runtime.parse_frontmatter("name: [unterminated\n")
+
+    assert frontmatter == {}
+    assert errors
+    assert errors[0].startswith("Invalid YAML frontmatter")
+
+
+def test_a0_manage_plugin_skill_frontmatter_is_valid_yaml():
+    text = (PROJECT_ROOT / "skills" / "a0-manage-plugin" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    frontmatter, body, errors = runtime.split_frontmatter(text)
+
+    assert errors == []
+    assert frontmatter["name"] == "a0-manage-plugin"
+    assert "Agent Zero Plugin Management" in body
+
+
+def test_renamed_skills_use_standard_frontmatter_only():
+    skill_paths = [
+        PROJECT_ROOT / "skills" / "build-skill" / "SKILL.md",
+        PROJECT_ROOT / "skills" / "scheduled-tasks" / "SKILL.md",
+        PROJECT_ROOT / "plugins" / "_a0_connector" / "skills" / "host-code-execution" / "SKILL.md",
+        PROJECT_ROOT / "plugins" / "_a0_connector" / "skills" / "host-computer-use" / "SKILL.md",
+        PROJECT_ROOT / "plugins" / "_a0_connector" / "skills" / "host-file-editing" / "SKILL.md",
+        PROJECT_ROOT / "plugins" / "_a0_connector" / "skills" / "setup-a0-cli" / "SKILL.md",
+        PROJECT_ROOT / "plugins" / "_browser" / "skills" / "browser-automation" / "SKILL.md",
+        PROJECT_ROOT / "plugins" / "_browser" / "skills" / "browser-extension-control" / "SKILL.md",
+        PROJECT_ROOT / "plugins" / "_browser" / "skills" / "browser-form-workflows" / "SKILL.md",
+    ]
+
+    for path in skill_paths:
+        frontmatter, body, errors = runtime.split_frontmatter(path.read_text(encoding="utf-8"))
+        assert errors == []
+        assert set(frontmatter) == {"name", "description"}
+        assert frontmatter["name"] == path.parent.name
+        assert frontmatter["description"]
+        assert body
 
 
 def test_unload_agent_skill_removes_loaded_skill_by_name():
     agent = DummyAgent()
     agent.data[runtime.AGENT_DATA_NAME_LOADED_SKILLS] = [
-        "computer-use-remote",
+        "host-computer-use",
         "a0-development",
     ]
 
     removed = runtime.unload_agent_skill(
         agent,
-        {"name": "computer-use-remote", "path": "/a0/skills/computer-use-remote"},
+        {
+            "name": "host-computer-use",
+            "path": "/a0/plugins/_a0_connector/skills/host-computer-use",
+        },
     )
 
     assert removed is True

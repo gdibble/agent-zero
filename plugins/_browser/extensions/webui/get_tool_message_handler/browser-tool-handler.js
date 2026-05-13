@@ -4,17 +4,17 @@ import {
 } from "/components/messages/action-buttons/simple-action-buttons.js";
 import { store as stepDetailStore } from "/components/modals/process-step-detail/step-detail-store.js";
 import { store as speechStore } from "/components/chat/speech/speech-store.js";
-import { store as rightCanvasStore } from "/components/canvas/right-canvas-store.js";
 import { store as browserStore } from "/plugins/_browser/webui/browser-store.js";
 import { getNamespacedClient } from "/js/websocket.js";
+import { open as openSurface } from "/js/surfaces.js";
 import {
   buildDetailPayload,
   cleanStepTitle,
   drawProcessStep,
 } from "/js/messages.js";
 
-const BROWSER_MODAL = "/plugins/_browser/webui/main.html";
 const BROWSER_SCREENSHOT_KVP_KEY = "Screenshot";
+const BROWSER_SNAPSHOT_META_KEY = "browser_snapshot";
 const BROWSER_SCREENSHOT_STYLE_ID = "a0-browser-screenshot-kvp-style";
 const AUTO_OPEN_WINDOW_MS = 10 * 60 * 1000;
 const PREVIEW_REFRESH_MS = 2500;
@@ -34,19 +34,8 @@ export default async function registerBrowserToolHandler(extData) {
   }
 }
 
-async function openBrowserCanvas(payload = {}) {
-  if (rightCanvasStore?.open) {
-    await rightCanvasStore.open("browser", payload);
-    return;
-  }
-
-  if (window.ensureModalOpen) {
-    await window.ensureModalOpen(BROWSER_MODAL);
-    return;
-  }
-  if (window.openModal) {
-    await window.openModal(BROWSER_MODAL);
-  }
+async function openBrowserSurface(payload = {}) {
+  await openSurface("browser", payload);
 }
 
 async function browserAllowsToolAutofocus() {
@@ -74,7 +63,14 @@ function normalizeBrowserAction(kvps = {}) {
   return String(kvps.action || "").trim().toLowerCase().replace("-", "_");
 }
 
+function browserSnapshotMeta(kvps = {}) {
+  return kvps?.[BROWSER_SNAPSHOT_META_KEY] && typeof kvps[BROWSER_SNAPSHOT_META_KEY] === "object"
+    ? kvps[BROWSER_SNAPSHOT_META_KEY]
+    : {};
+}
+
 function browserIdFromResult(result = {}, kvps = {}) {
+  const snapshotMeta = browserSnapshotMeta(kvps);
   const browsers = Array.isArray(result.browsers) ? result.browsers : [];
   const lastInteractedId = result.last_interacted_browser_id;
   const listedBrowser = lastInteractedId
@@ -86,12 +82,14 @@ function browserIdFromResult(result = {}, kvps = {}) {
     || result.state?.id
     || result.last_interacted_browser_id
     || listedBrowser?.id
+    || snapshotMeta.browser_id
     || kvps.browser_id
     || null
   );
 }
 
 function browserContextIdFromResult(result = {}, kvps = {}) {
+  const snapshotMeta = browserSnapshotMeta(kvps);
   const browserId = browserIdFromResult(result, kvps);
   const browsers = Array.isArray(result.browsers) ? result.browsers : [];
   const listedBrowser = browserId
@@ -101,6 +99,7 @@ function browserContextIdFromResult(result = {}, kvps = {}) {
     result.context_id
     || result.state?.context_id
     || listedBrowser?.context_id
+    || snapshotMeta.context_id
     || kvps.context_id
     || kvps.contextId
     || null
@@ -115,11 +114,7 @@ function isFreshToolMessage(timestamp) {
 }
 
 function isBrowserCanvasAlreadyOpen() {
-  return Boolean(
-    rightCanvasStore?.isOpen
-    && rightCanvasStore?.activeSurfaceId === "browser"
-    && !rightCanvasStore?.isMobileMode,
-  );
+  return Boolean(document.querySelector('[data-surface-id="browser"].is-active .browser-panel'));
 }
 
 // Allowlist: only these actions sync an already-open viewer to the target tab.
@@ -146,15 +141,16 @@ function syncOpenBrowserCanvas(args, result) {
   if (!shouldSyncOpenBrowserCanvas(args, result)) return;
   const kvps = args?.kvps || {};
   const browserId = browserIdFromResult(result, kvps);
-  const key = `${args.id || ""}:${kvps.action || ""}:${browserId || ""}:${result.currentUrl || result.state?.currentUrl || kvps.url || ""}`;
+  const contextId = browserContextIdFromResult(result, kvps);
+  const key = `${args.id || ""}:${contextId || ""}:${kvps.action || ""}:${browserId || ""}:${result.currentUrl || result.state?.currentUrl || kvps.url || ""}`;
   if (syncedBrowserCanvases.has(key)) return;
   syncedBrowserCanvases.add(key);
   requestAnimationFrame(async () => {
     if (!isBrowserCanvasAlreadyOpen()) return;
     if (!(await browserAllowsToolAutofocus())) return;
-    void rightCanvasStore.open("browser", {
+    void openSurface("browser", {
       browserId,
-      contextId: browserContextIdFromResult(result, kvps),
+      contextId,
       source: "tool-sync",
     });
   });
@@ -198,6 +194,16 @@ function snapshotToObjectUrl(snapshot) {
     chunks.push(bytes);
   }
   return URL.createObjectURL(new Blob(chunks, { type: snapshot.mime || "image/jpeg" }));
+}
+
+function staticScreenshotUri(kvps = {}) {
+  const metaUri = browserSnapshotMeta(kvps).uri;
+  const value = kvps?.[BROWSER_SCREENSHOT_KVP_KEY] || metaUri || "";
+  return typeof value === "string" && value.startsWith("img://") ? value : "";
+}
+
+function staticScreenshotSrc(uri = "") {
+  return uri ? uri.replace("img://", "/api/image_get?path=") : "";
 }
 
 function releaseLiveScreenshotFrame(viewerId) {
@@ -314,7 +320,7 @@ function ensureBrowserScreenshotStyles() {
   document.head.appendChild(style);
 }
 
-function renderBrowserScreenshotKvp(kvpsTable, resolveBrowserPayload, label) {
+function renderBrowserScreenshotKvp(kvpsTable, resolveBrowserPayload, label, staticUri = "") {
   if (!kvpsTable || typeof resolveBrowserPayload !== "function") return;
   ensureBrowserScreenshotStyles();
 
@@ -344,16 +350,22 @@ function renderBrowserScreenshotKvp(kvpsTable, resolveBrowserPayload, label) {
     event.stopPropagation();
     const canvasPayload = resolveBrowserPayload();
     if (!canvasPayload) return;
-    await openBrowserCanvas(canvasPayload);
+    await openBrowserSurface(canvasPayload);
   });
 
   cell.textContent = "";
   cell.appendChild(button);
-  cell.__browserScreenshotCleanup = startBrowserScreenshotPreview(
-    button,
-    button.querySelector(".browser-screenshot-kvp-image"),
-    resolveBrowserPayload,
-  );
+  const image = button.querySelector(".browser-screenshot-kvp-image");
+  if (staticUri) {
+    image.src = staticScreenshotSrc(staticUri);
+    button.classList.add("has-frame");
+    cell.__browserScreenshotCleanup = () => {
+      image.removeAttribute("src");
+      button.classList.remove("has-frame");
+    };
+    return;
+  }
+  cell.__browserScreenshotCleanup = startBrowserScreenshotPreview(button, image, resolveBrowserPayload);
 }
 
 function startBrowserScreenshotPreview(button, image, resolveBrowserPayload) {
@@ -462,18 +474,23 @@ function drawBrowserTool({
   ].filter(Boolean);
   const contentText = String(content ?? "");
   const browserResult = parseBrowserResult(contentText);
+  const screenshotUri = staticScreenshotUri(kvps);
   const browserId = browserIdFromResult(browserResult, kvps);
   const browserCanvasPayload = buildBrowserCanvasPayload(browserResult, kvps);
   const browserPreviewLabel = browserId
-    ? `Open Browser canvas for Browser ${browserId}`
-    : "Open Browser canvas from screenshot";
+    ? `Open Browser surface for Browser ${browserId}`
+    : "Open Browser surface from screenshot";
   if (shouldRenderBrowserScreenshotKvp(browserResult, kvps)) {
     displayKvps[BROWSER_SCREENSHOT_KVP_KEY] = "";
   }
+  if (screenshotUri) {
+    displayKvps[BROWSER_SCREENSHOT_KVP_KEY] = screenshotUri;
+  }
+  delete displayKvps[BROWSER_SNAPSHOT_META_KEY];
   const browserButton = createActionButton(
     "visibility",
     "Browser",
-    () => openBrowserCanvas(
+    () => openBrowserSurface(
       buildBrowserCanvasPayload(browserResult, kvps, "tool")
       || {
         browserId,
@@ -518,6 +535,7 @@ function drawBrowserTool({
       || buildBrowserCanvasPayload({}, kvps)
     ),
     browserPreviewLabel,
+    screenshotUri,
   );
   syncOpenBrowserCanvas(args, browserResult);
   return result;

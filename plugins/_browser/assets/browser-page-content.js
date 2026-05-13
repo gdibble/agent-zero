@@ -1,7 +1,38 @@
 (() => {
   const GLOBAL_KEY = "__spaceBrowserPageContent__";
   const DOM_HELPER_KEY = "__spaceBrowserDomHelper__";
-  const VERSION = "11";
+  const VERSION = "12";
+  const REQUIRED_API_NAMES = Object.freeze([
+    "annotate",
+    "boundingBoxFor",
+    "capture",
+    "click",
+    "detail",
+    "fileInputElementFor",
+    "fileInputFor",
+    "pointFor",
+    "scroll",
+    "select",
+    "setChecked",
+    "submit",
+    "type",
+    "typeSubmit"
+  ]);
+
+  function patchOpenShadowDom() {
+    const original = Element.prototype.attachShadow;
+    if (!original || original.__a0BrowserOpenShadowPatch) {
+      return;
+    }
+    const patched = function attachShadow(options) {
+      return original.call(this, { ...(options || {}), mode: "open" });
+    };
+    patched.__a0BrowserOpenShadowPatch = true;
+    Element.prototype.attachShadow = patched;
+  }
+
+  patchOpenShadowDom();
+
   const BLOCK_TAGS = new Set([
     "ADDRESS",
     "ARTICLE",
@@ -615,6 +646,19 @@
       .split(/[.:]/u, 1)[0];
   }
 
+  function isGlobalOrDelegatedEventBinding(value) {
+    const parts = String(value || "")
+      .trim()
+      .toLowerCase()
+      .split(/[.:]/u)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    return parts.includes("window")
+      || parts.includes("document")
+      || parts.includes("outside")
+      || parts.includes("away");
+  }
+
   function isInteractiveEventName(value) {
     return INTERACTIVE_EVENT_NAMES.has(normalizeInteractiveEventName(value));
   }
@@ -626,10 +670,16 @@
     }
 
     if (normalizedName.startsWith("@")) {
+      if (isGlobalOrDelegatedEventBinding(normalizedName.slice(1))) {
+        return false;
+      }
       return isInteractiveEventName(normalizedName.slice(1));
     }
 
     if (normalizedName.startsWith("x-on:") || normalizedName.startsWith("v-on:")) {
+      if (isGlobalOrDelegatedEventBinding(normalizedName.slice(5))) {
+        return false;
+      }
       return isInteractiveEventName(normalizedName.slice(5));
     }
 
@@ -3958,6 +4008,11 @@
     setChecked(referenceId, checked) {
       return setCheckedReference(referenceId, checked);
     },
+    ready() {
+      const api = globalThis[GLOBAL_KEY];
+      return Boolean(api && REQUIRED_API_NAMES.every((name) => typeof api[name] === "function"));
+    },
+    requiredApis: REQUIRED_API_NAMES.slice(),
     version: VERSION
   };
 })();

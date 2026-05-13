@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -366,11 +367,15 @@ def create_usr_backup(
                 root_path = Path(root)
                 for filename in files:
                     source_file = root_path / filename
-                    if source_file.is_symlink() and not source_file.exists():
-                        logger.log(f"Skipping broken symlink during usr backup: {source_file}")
+                    if not should_include_usr_backup_entry(source_file, logger):
                         continue
                     archive_name = Path("usr") / source_file.relative_to(usr_dir)
-                    archive.write(source_file, archive_name.as_posix())
+                    try:
+                        archive.write(source_file, archive_name.as_posix())
+                    except FileNotFoundError:
+                        logger.log(f"Skipping vanished usr backup entry: {source_file}")
+                    except OSError as exc:
+                        logger.log(f"Skipping usr backup entry after read error: {source_file}: {exc}")
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(temporary_backup), str(destination))
@@ -379,6 +384,41 @@ def create_usr_backup(
     finally:
         if temporary_backup.exists():
             temporary_backup.unlink(missing_ok=True)
+
+
+def should_include_usr_backup_entry(source_file: Path, logger: AttemptLogger) -> bool:
+    try:
+        source_stat = source_file.lstat()
+    except FileNotFoundError:
+        logger.log(f"Skipping vanished usr backup entry: {source_file}")
+        return False
+    except OSError as exc:
+        logger.log(f"Skipping unreadable usr backup entry: {source_file}: {exc}")
+        return False
+
+    if stat.S_ISLNK(source_stat.st_mode):
+        try:
+            target_stat = source_file.stat()
+        except FileNotFoundError:
+            logger.log(f"Skipping broken symlink during usr backup: {source_file}")
+            return False
+        except OSError as exc:
+            logger.log(
+                f"Skipping unreadable symlink target during usr backup: {source_file}: {exc}"
+            )
+            return False
+        if not stat.S_ISREG(target_stat.st_mode):
+            logger.log(
+                f"Skipping non-regular symlink target during usr backup: {source_file}"
+            )
+            return False
+        return True
+
+    if not stat.S_ISREG(source_stat.st_mode):
+        logger.log(f"Skipping non-regular usr backup entry: {source_file}")
+        return False
+
+    return True
 
 
 def run_command(
@@ -406,6 +446,24 @@ def run_command(
             or f"Command failed with exit code {completed.returncode}: {' '.join(command)}"
         )
     return completed
+
+
+def clean_uv_cache(logger: AttemptLogger) -> None:
+    uv_path = shutil.which("uv")
+    if not uv_path:
+        logger.log("uv executable not found, skipping uv cache clean.")
+        return
+
+    logger.log("Cleaning uv cache before continuing self-update startup.")
+    try:
+        run_command(
+            [uv_path, "cache", "clean"],
+            cwd=None,
+            logger=logger,
+            error_message="Failed to clean uv cache during self-update.",
+        )
+    except Exception as exc:
+        logger.log(f"uv cache clean skipped after error: {exc}")
 
 
 def has_local_rollback_changes(repo_dir: Path) -> bool:
@@ -1180,6 +1238,7 @@ def docker_run_ui() -> int:
         logger.reset()
         logger.log(f"Consumed update file at {TRIGGER_FILE}")
         logger.log_block("Trigger file content", raw_text)
+        clean_uv_cache(logger)
 
         try:
             current = get_repo_version_info(REPO_DIR)

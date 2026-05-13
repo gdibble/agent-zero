@@ -18,7 +18,7 @@ from helpers import files, plugins
 from plugins._browser.helpers.config import PLUGIN_NAME, get_browser_config
 
 
-EXTENSIONS_ROOT_DIR = ("usr", "plugins", PLUGIN_NAME, "extensions")
+EXTENSIONS_ROOT_DIR = ("usr", "_browser", "extensions")
 EXTENSION_ID_RE = re.compile(r"^[a-p]{32}$")
 WEB_STORE_ID_RE = re.compile(r"(?<![a-p])([a-p]{32})(?![a-p])")
 CHROME_VERSION_RE = re.compile(r"(\d+(?:\.\d+){0,3})")
@@ -41,9 +41,7 @@ WEB_STORE_DOWNLOAD_URL = (
 
 
 def get_extensions_root() -> Path:
-    root = Path(files.get_abs_path(*EXTENSIONS_ROOT_DIR))
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return Path(files.get_abs_path(*EXTENSIONS_ROOT_DIR))
 
 
 def parse_chrome_web_store_extension_id(value: str) -> str:
@@ -86,7 +84,7 @@ def install_chrome_web_store_extension(source: str) -> dict[str, Any]:
     extension_id = parse_chrome_web_store_extension_id(source)
     target = get_extensions_root() / "chrome-web-store" / extension_id
 
-    with tempfile.TemporaryDirectory(prefix="a0-browser-ext-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="browser-extension-control-") as tmp:
         archive_path = Path(tmp) / f"{extension_id}.crx"
         _download_crx(extension_id, archive_path)
         payload_path = Path(tmp) / f"{extension_id}.zip"

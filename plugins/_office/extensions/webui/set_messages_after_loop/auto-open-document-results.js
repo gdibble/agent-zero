@@ -1,14 +1,17 @@
+import { store as officeStore } from "/plugins/_office/webui/office-store.js";
+import { store as desktopStore } from "/plugins/_desktop/webui/desktop-store.js";
+import { open as openSurface } from "/js/surfaces.js";
+
 const SYNC_WINDOW_MS = 10 * 60 * 1000;
-const DESKTOP_OFFICE_FORMATS = new Set(["odt", "ods", "odp", "docx", "xlsx", "pptx"]);
 const syncedDocumentResults = new Set();
 
-export default async function syncDocumentResultsIntoOpenCanvas(context) {
+export default async function syncDocumentResultsIntoOpenOfficeModal(context) {
   if (!context?.results?.length || context.historyEmpty) return;
 
   for (const { args } of context.results) {
     const payload = getDocumentPayload(args);
     if (getToolName(payload) !== "document_artifact") continue;
-    if (!shouldSyncOpenOfficeCanvas(args, payload)) continue;
+    if (!shouldSyncOpenOfficeModal(args, payload)) continue;
 
     const document = payload.document && typeof payload.document === "object" ? payload.document : {};
     const path = payload.path || document.path || "";
@@ -25,21 +28,15 @@ export default async function syncDocumentResultsIntoOpenCanvas(context) {
     if (syncedDocumentResults.has(key)) continue;
     syncedDocumentResults.add(key);
 
-    if (!isOfficeCanvasOrModalOpen() && shouldColdOpenOfficeCanvas(payload, document)) {
-      await openOfficeCanvasFromResult({ path, file_id: fileId });
+    if (shouldOpenDocumentUiFromResult(payload, document)) {
+      globalThis.setTimeout(() => {
+        void openDocumentUiFromResult({ path, file_id: fileId }, payload, document);
+      }, 0);
       continue;
     }
 
-    globalThis.setTimeout(async () => {
-      if (!isOfficeCanvasOrModalOpen()) return;
-      const office = globalThis.Alpine?.store?.("office");
-      if (!office || isDirtySameDocument(office, { path, file_id: fileId })) return;
-      await office.openSession?.({
-        path,
-        file_id: fileId,
-        refresh: true,
-        source: "tool-result-sync",
-      });
+    globalThis.setTimeout(() => {
+      void syncOpenDocumentSurfaces({ path, file_id: fileId });
     }, 0);
   }
 }
@@ -63,8 +60,14 @@ function pickPayloadFields(args = {}) {
     "tool_name",
     "action",
     "canvas_surface",
+    "extension",
     "file_id",
     "format",
+    "open_canvas",
+    "open_document",
+    "open_desktop",
+    "open_in_canvas",
+    "open_in_desktop",
     "path",
     "version",
     "last_modified",
@@ -78,69 +81,140 @@ function getToolName(payload = {}) {
   return String(payload._tool_name || payload.tool_name || "").trim();
 }
 
-function shouldSyncOpenOfficeCanvas(args = {}, payload = {}) {
+function shouldSyncOpenOfficeModal(args = {}, payload = {}) {
   if (!isFresh(args.timestamp, payload.last_modified || payload.document?.last_modified)) return false;
   const action = String(payload.action || "").trim().toLowerCase().replace("-", "_");
   return ["create", "open", "edit", "restore_version"].includes(action);
 }
 
-function shouldColdOpenOfficeCanvas(payload = {}, document = {}) {
-  const action = String(payload.action || "").trim().toLowerCase().replace("-", "_");
-  if (!["create", "open"].includes(action)) return false;
-  return DESKTOP_OFFICE_FORMATS.has(documentFormat(payload, document));
+function shouldOpenDocumentUiFromResult(payload = {}, document = {}) {
+  if (!isExplicitDocumentUiRequest(payload)) return false;
+  return Boolean(documentExtension(payload, document));
 }
 
-async function openOfficeCanvasFromResult(document = {}) {
-  const canvas = globalThis.Alpine?.store?.("rightCanvas")
-    || (await import("/components/canvas/right-canvas-store.js")).store;
-  await canvas?.open?.("office", {
+function isExplicitDocumentUiRequest(payload = {}) {
+  const action = String(payload.action || "").trim().toLowerCase().replace("-", "_");
+  return action === "open"
+    || truthy(payload.open_in_canvas)
+    || truthy(payload.open_canvas)
+    || truthy(payload.open_document)
+    || truthy(payload.open_in_desktop)
+    || truthy(payload.open_desktop);
+}
+
+async function openDocumentUiFromResult(target = {}, payload = {}, document = {}) {
+  await openSurface("desktop", {
+    path: target.path || "",
+    file_id: target.file_id || "",
+    refresh: true,
+    source: "tool-result-open",
+  });
+}
+
+function documentExtension(payload = {}, document = {}) {
+  return String(
+    payload.format
+      || payload.extension
+      || document.extension
+      || document.format
+      || "",
+  ).toLowerCase();
+}
+
+function isOfficeModalOpen() {
+  if (
+    globalThis.isModalOpen?.("/plugins/_office/webui/main.html")
+      || globalThis.isModalOpen?.("plugins/_office/webui/main.html")
+  ) {
+    return true;
+  }
+
+  const panels = Array.from(globalThis.document?.querySelectorAll?.(".modal-inner.office-modal .office-panel") || []);
+  return panels.some((panel) => !isDesktopPanel(panel));
+}
+
+function isDesktopSurfaceOpen() {
+  return Boolean(
+    globalThis.document?.querySelector?.(
+      '[data-surface-id="desktop"] .office-panel, .modal-inner[data-surface-id="desktop"] .office-panel, .modal-inner[data-canvas-surface="desktop"] .office-panel',
+    ),
+  );
+}
+
+async function syncOpenDocumentSurfaces(document = {}) {
+  await syncOpenDesktopCanvas(document);
+  await syncOpenOfficeModal(document);
+}
+
+async function syncOpenDesktopCanvas(document = {}) {
+  const desktop = desktopStore;
+  if (!desktop || !isDesktopSurfaceOpen()) return false;
+  if (!hasSameDocument(desktop, document)) return false;
+  if (isDirtySameDocument(desktop, document)) return false;
+  await desktop.openSession?.({
     path: document.path || "",
     file_id: document.file_id || "",
     refresh: true,
     source: "tool-result-sync",
   });
+  return true;
 }
 
-function documentFormat(payload = {}, document = {}) {
-  return String(
-    payload.format
-      || payload.extension
-      || document.extension
-      || extensionOf(payload.path || document.path || ""),
-  ).trim().toLowerCase().replace(/^\./, "");
+async function syncOpenOfficeModal(document = {}) {
+  const office = officeStore;
+  if (!office || !isOfficeModalOpen()) return false;
+  if (!hasSameDocument(office, document)) return false;
+  if (isDirtySameDocument(office, document)) return false;
+  await office.openSession?.({
+    path: document.path || "",
+    file_id: document.file_id || "",
+    refresh: true,
+    source: "tool-result-sync",
+  });
+  return true;
 }
 
-function extensionOf(path = "") {
-  const name = String(path || "").split("?")[0].split("#")[0].split("/").filter(Boolean).pop() || "";
-  const index = name.lastIndexOf(".");
-  return index >= 0 ? name.slice(index + 1) : "";
-}
-
-function isOfficeCanvasAlreadyOpen() {
-  const canvas = globalThis.Alpine?.store?.("rightCanvas");
-  return Boolean(canvas?.isOpen && canvas?.activeSurfaceId === "office");
-}
-
-function isOfficeCanvasOrModalOpen() {
-  return Boolean(isOfficeCanvasAlreadyOpen() || isOfficeModalAlreadyOpen());
-}
-
-function isOfficeModalAlreadyOpen() {
+function isDesktopPanel(panel = null) {
   return Boolean(
-    globalThis.isModalOpen?.("/plugins/_office/webui/main.html")
-      || globalThis.isModalOpen?.("plugins/_office/webui/main.html")
-      || globalThis.document?.querySelector?.(".office-modal .office-panel, .modal .office-panel"),
+    panel?.closest?.('[data-surface-id="desktop"], [data-canvas-surface="desktop"]'),
   );
 }
 
-function isDirtySameDocument(office, document = {}) {
-  if (!office?.dirty || !office?.session) return false;
-  const path = String(document.path || "");
-  const fileId = String(document.file_id || "");
+function hasSameDocument(store, document = {}) {
+  return documentEntries(store).some((entry) => documentsMatch(entry, document));
+}
+
+function isDirtySameDocument(store, document = {}) {
+  return documentEntries(store).some((entry) => {
+    if (!documentsMatch(entry, document)) return false;
+    const isActive = entry === store?.session || (entry.tab_id && entry.tab_id === store?.activeTabId);
+    return Boolean(entry.dirty || (isActive && store?.dirty));
+  });
+}
+
+function documentEntries(store) {
+  const entries = [];
+  if (store?.session) entries.push(store.session);
+  if (Array.isArray(store?.tabs)) entries.push(...store.tabs);
+  return entries;
+}
+
+function documentsMatch(entry = {}, document = {}) {
+  const path = String(document.path || "").trim();
+  const fileId = String(document.file_id || "").trim();
+  const entryPath = String(entry.path || entry.document?.path || "").trim();
+  const entryFileId = String(entry.file_id || entry.document?.file_id || "").trim();
   return Boolean(
-    (fileId && office.session.file_id === fileId)
-      || (path && office.session.path === path),
+    (fileId && entryFileId === fileId)
+      || (path && entryPath === path),
   );
+}
+
+function truthy(value) {
+  if (value === true) return true;
+  if (value === false || value == null) return false;
+  if (typeof value === "number") return value !== 0;
+  return ["1", "true", "yes", "y", "on"].includes(String(value).trim().toLowerCase());
 }
 
 function isFresh(...timestamps) {

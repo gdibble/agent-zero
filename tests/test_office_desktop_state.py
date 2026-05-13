@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from plugins._office.helpers import desktop_state
+from plugins._desktop.helpers import desktop_state
 
 
 def _completed(command, returncode=0, stdout="", stderr=""):
@@ -92,6 +92,61 @@ def test_desktop_state_collects_x11_state_from_mocked_tools(tmp_path, monkeypatc
     assert [window["title"] for window in state["windows"]] == ["LibreOffice Calc", "Terminal"]
 
 
+def test_desktop_state_allows_missing_active_window_when_display_is_reachable(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    profile_dir = tmp_path / "profiles" / desktop_state.SESSION_ID
+    session_dir.mkdir(parents=True)
+    profile_dir.mkdir(parents=True)
+    (session_dir / f"{desktop_state.SESSION_ID}.json").write_text(
+        '{"display": 120, "profile_dir": "%s"}' % profile_dir,
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(desktop_state, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(desktop_state, "PROFILE_DIR", tmp_path / "profiles")
+    monkeypatch.setattr(desktop_state.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        name = Path(command[0]).name
+        if name == "xrandr":
+            return _completed(command, stdout="Screen 0: current 543 x 792, maximum 1920 x 1080\n")
+        if name == "xdotool" and command[1:3] == ["getmouselocation", "--shell"]:
+            return _completed(command, stdout="X=43\nY=244\nSCREEN=0\nWINDOW=18874412\n")
+        if name == "xdotool" and command[1] == "getactivewindow":
+            return _completed(
+                command,
+                returncode=1,
+                stderr="XGetWindowProperty[_NET_ACTIVE_WINDOW] failed (code=1)\n",
+            )
+        if name == "xdotool" and command[1] == "search":
+            return _completed(command, stdout="18874412\n")
+        if name == "xdotool" and command[1] == "getwindowname":
+            return _completed(command, stdout="Desktop\n")
+        if name == "xwininfo":
+            return _completed(
+                command,
+                stdout=(
+                    "  Absolute upper-left X:  0\n"
+                    "  Absolute upper-left Y:  0\n"
+                    "  Width: 543\n"
+                    "  Height: 792\n"
+                ),
+            )
+        if name == "xprop":
+            return _completed(command, stdout='WM_CLASS(STRING) = "xfdesktop", "Xfdesktop"\n')
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(desktop_state.subprocess, "run", fake_run)
+
+    state = desktop_state.collect_state()
+
+    assert state["ok"] is True
+    assert state["active_window"] is None
+    assert state["errors"] == []
+    assert [window["title"] for window in state["windows"]] == ["Desktop"]
+
+
 def test_desktop_state_screenshot_capture_uses_xwd_and_pillow_when_available(tmp_path, monkeypatch):
     monkeypatch.setattr(desktop_state, "SCREENSHOT_DIR", tmp_path)
     capabilities = {"xwd": "/usr/bin/xwd"}
@@ -132,6 +187,53 @@ def test_desktop_state_screenshot_capture_uses_xwd_and_pillow_when_available(tmp
     assert screenshot["format"] == "png"
     assert (tmp_path / "shot.png").read_bytes() == b"png"
     assert not (tmp_path / "shot.xwd").exists()
+
+
+def test_desktop_state_default_screenshot_path_is_context_scoped(tmp_path, monkeypatch):
+    monkeypatch.setattr(desktop_state, "SCREENSHOT_DIR", tmp_path)
+    capabilities = {"xwd": "/usr/bin/xwd"}
+    env = {"DISPLAY": ":120"}
+
+    def fake_run(command, *, env, timeout):
+        raw_path = Path(command[command.index("-out") + 1])
+        raw_path.write_bytes(b"xwd")
+        return _completed(command)
+
+    image_module = types.ModuleType("PIL.Image")
+
+    class FakeImage:
+        width = 320
+        height = 240
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def save(self, target):
+            Path(target).write_bytes(b"png")
+
+    image_module.open = lambda _path: FakeImage()
+    pil_module = types.ModuleType("PIL")
+    pil_module.Image = image_module
+
+    monkeypatch.setattr(desktop_state, "run", fake_run)
+    monkeypatch.setitem(sys.modules, "PIL", pil_module)
+    monkeypatch.setitem(sys.modules, "PIL.Image", image_module)
+
+    screenshot = desktop_state.capture_screenshot(
+        env,
+        capabilities,
+        errors=[],
+        context_id="ctx/id",
+    )
+
+    path = Path(screenshot["path"])
+    assert screenshot["ok"] is True
+    assert path.parent == tmp_path / "ctx_id"
+    assert path.name.startswith("desktop-")
+    assert desktop_state.latest_screenshot(context_id="ctx/id")["path"] == str(path)
 
 
 def test_xwd_fallback_parser_handles_truecolor_pixels(tmp_path, monkeypatch):
