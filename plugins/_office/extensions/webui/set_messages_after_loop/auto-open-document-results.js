@@ -1,21 +1,28 @@
 import { store as officeStore } from "/plugins/_office/webui/office-store.js";
 import { store as desktopStore } from "/plugins/_desktop/webui/desktop-store.js";
+import { store as editorStore } from "/plugins/_editor/webui/editor-store.js";
 import { open as openSurface } from "/js/surfaces.js";
 
 const SYNC_WINDOW_MS = 10 * 60 * 1000;
 const syncedDocumentResults = new Set();
 
-export default async function syncDocumentResultsIntoOpenOfficeModal(context) {
+export default async function syncDocumentResultsIntoOpenSurfaces(context) {
   if (!context?.results?.length || context.historyEmpty) return;
 
   for (const { args } of context.results) {
     const payload = getDocumentPayload(args);
-    if (getToolName(payload) !== "document_artifact") continue;
+    const toolName = getToolName(payload);
+    if (toolName === "text_editor") {
+      syncTextEditorMarkdownResult(args, payload);
+      continue;
+    }
+    if (toolName !== "document_artifact") continue;
     if (!shouldSyncOpenOfficeModal(args, payload)) continue;
 
     const document = payload.document && typeof payload.document === "object" ? payload.document : {};
-    const path = payload.path || document.path || "";
-    const fileId = payload.file_id || document.file_id || "";
+    const target = documentTarget(payload, document);
+    const path = target.path || "";
+    const fileId = target.file_id || "";
     if (!path && !fileId) continue;
 
     const key = [
@@ -23,22 +30,45 @@ export default async function syncDocumentResultsIntoOpenOfficeModal(context) {
       payload.action || "",
       fileId || "",
       path || "",
-      payload.version || document.version || "",
+      target.version || "",
     ].join(":");
     if (syncedDocumentResults.has(key)) continue;
     syncedDocumentResults.add(key);
 
     if (shouldOpenDocumentUiFromResult(payload, document)) {
       globalThis.setTimeout(() => {
-        void openDocumentUiFromResult({ path, file_id: fileId }, payload, document);
+        void openDocumentUiFromResult(target, payload, document);
       }, 0);
       continue;
     }
 
     globalThis.setTimeout(() => {
-      void syncOpenDocumentSurfaces({ path, file_id: fileId });
+      void syncOpenDocumentSurfaces(target);
     }, 0);
   }
+}
+
+function syncTextEditorMarkdownResult(args = {}, payload = {}) {
+  const target = textEditorTarget(payload);
+  if (!target.path || target.extension !== "md") return;
+  if (!shouldSyncTextEditorResult(args, payload)) return;
+
+  globalThis.setTimeout(() => {
+    void syncOpenEditorSurface(target);
+  }, 0);
+}
+
+function documentTarget(payload = {}, document = {}) {
+  const extension = documentExtension(payload, document);
+  return {
+    ...document,
+    path: payload.path || document.path || "",
+    file_id: payload.file_id || document.file_id || "",
+    format: payload.format || document.format || extension,
+    extension,
+    version: payload.version || document.version || "",
+    last_modified: payload.last_modified || document.last_modified || "",
+  };
 }
 
 function getDocumentPayload(args = {}) {
@@ -71,6 +101,7 @@ function pickPayloadFields(args = {}) {
     "path",
     "version",
     "last_modified",
+    "method",
   ]) {
     if (args[key] != null && args[key] !== "") payload[key] = args[key];
   }
@@ -85,6 +116,12 @@ function shouldSyncOpenOfficeModal(args = {}, payload = {}) {
   if (!isFresh(args.timestamp, payload.last_modified || payload.document?.last_modified)) return false;
   const action = String(payload.action || "").trim().toLowerCase().replace("-", "_");
   return ["create", "open", "edit", "restore_version"].includes(action);
+}
+
+function shouldSyncTextEditorResult(args = {}, payload = {}) {
+  if (!isFresh(args.timestamp, payload.last_modified)) return false;
+  const action = String(payload.action || payload.method || "").trim().toLowerCase().replace("-", "_");
+  return ["write", "patch"].includes(action);
 }
 
 function shouldOpenDocumentUiFromResult(payload = {}, document = {}) {
@@ -103,7 +140,7 @@ function isExplicitDocumentUiRequest(payload = {}) {
 }
 
 async function openDocumentUiFromResult(target = {}, payload = {}, document = {}) {
-  await openSurface("desktop", {
+  await openSurface(surfaceForDocument(payload, document), {
     path: target.path || "",
     file_id: target.file_id || "",
     refresh: true,
@@ -119,6 +156,29 @@ function documentExtension(payload = {}, document = {}) {
       || document.format
       || "",
   ).toLowerCase();
+}
+
+function textEditorTarget(payload = {}) {
+  const path = String(payload.path || "").trim();
+  return {
+    path,
+    file_id: "",
+    extension: extensionFromPath(path),
+    format: extensionFromPath(path),
+    version: "",
+    last_modified: payload.last_modified || "",
+  };
+}
+
+function extensionFromPath(path = "") {
+  const clean = String(path || "").split("?")[0].split("#")[0];
+  const name = clean.split("/").filter(Boolean).pop() || "";
+  const index = name.lastIndexOf(".");
+  return index > 0 ? name.slice(index + 1).toLowerCase() : "";
+}
+
+function surfaceForDocument(payload = {}, document = {}) {
+  return documentExtension(payload, document) === "md" ? "editor" : "desktop";
 }
 
 function isOfficeModalOpen() {
@@ -141,9 +201,35 @@ function isDesktopSurfaceOpen() {
   );
 }
 
+function isEditorSurfaceOpen() {
+  return Boolean(
+    globalThis.document?.querySelector?.(
+      '[data-surface-id="editor"] .editor-panel, .modal-inner[data-surface-id="editor"] .editor-panel, .modal-inner[data-canvas-surface="editor"] .editor-panel',
+    ),
+  );
+}
+
 async function syncOpenDocumentSurfaces(document = {}) {
+  if (documentExtension({}, document) === "md") {
+    await syncOpenEditorSurface(document);
+    return;
+  }
   await syncOpenDesktopCanvas(document);
   await syncOpenOfficeModal(document);
+}
+
+async function syncOpenEditorSurface(document = {}) {
+  const editor = editorStore;
+  if (!editor || !isEditorSurfaceOpen()) return false;
+  if (!hasSameDocument(editor, document)) return false;
+  if (isDirtySameDocument(editor, document)) return false;
+  await editor.openSession?.({
+    path: document.path || "",
+    file_id: document.file_id || "",
+    refresh: true,
+    source: "tool-result-sync",
+  });
+  return true;
 }
 
 async function syncOpenDesktopCanvas(document = {}) {
@@ -188,7 +274,7 @@ function isDirtySameDocument(store, document = {}) {
   return documentEntries(store).some((entry) => {
     if (!documentsMatch(entry, document)) return false;
     const isActive = entry === store?.session || (entry.tab_id && entry.tab_id === store?.activeTabId);
-    return Boolean(entry.dirty || (isActive && store?.dirty));
+    return Boolean(entry.dirty || (isActive && (store?.dirty || store?.previewEditDirty)));
   });
 }
 

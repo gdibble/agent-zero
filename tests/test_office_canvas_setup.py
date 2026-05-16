@@ -40,8 +40,10 @@ def test_modals_are_generic_and_surfaces_own_live_surface_paths():
     assert "closeSurfaceGroupModals" in surfaces_js
     assert 'id: "browser"' in surfaces_js
     assert 'id: "desktop"' in surfaces_js
+    assert 'id: "editor"' in surfaces_js
     assert "/plugins/_browser/webui/main.html" in surfaces_js
     assert "/plugins/_desktop/webui/main.html" in surfaces_js
+    assert "/plugins/_editor/webui/main.html" in surfaces_js
     assert "LEGACY_SURFACE_IDS" in surfaces_js
     assert '["office", "desktop"]' in surfaces_js
     assert "htmlDataset.surfaceId" in surfaces_js
@@ -81,6 +83,27 @@ def test_right_canvas_uses_desktop_surface_id_and_migrates_legacy_office_state()
     )
     right_canvas_css = read("webui", "components", "canvas", "right-canvas.css")
     desktop_web_panel = read("plugins", "_desktop", "webui", "desktop-panel.html")
+    editor_register = read(
+        "plugins",
+        "_editor",
+        "extensions",
+        "webui",
+        "right_canvas_register_surfaces",
+        "register-editor.js",
+    )
+    editor_panel = read(
+        "plugins",
+        "_editor",
+        "extensions",
+        "webui",
+        "right-canvas-panels",
+        "editor-panel.html",
+    )
+    editor_main = read("plugins", "_editor", "webui", "main.html")
+    editor_web_panel = read("plugins", "_editor", "webui", "editor-panel.html")
+    editor_store = read("plugins", "_editor", "webui", "editor-store.js")
+    editor_preview = read("plugins", "_editor", "webui", "editor-preview.js")
+    safe_markdown = read("webui", "js", "safe-markdown.js")
 
     assert 'await callJsExtensions("surfaces_register", this);' in canvas_store
     assert 'await callJsExtensions("right_canvas_register_surfaces", this);' in canvas_store
@@ -89,13 +112,71 @@ def test_right_canvas_uses_desktop_surface_id_and_migrates_legacy_office_state()
     assert "const saved = migratePersistedSurfaceState(JSON.parse" in canvas_store
     assert 'id: "desktop"' in desktop_register
     assert 'modalPath: "/plugins/_desktop/webui/main.html"' in desktop_register
+    assert 'id: "editor"' in editor_register
+    assert 'title: "Editor"' in editor_register
+    assert 'order: 30' in editor_register
+    assert 'modalPath: "/plugins/_editor/webui/main.html"' in editor_register
     assert 'data-surface-id="desktop"' in desktop_panel
     assert "isSurfaceVisible('desktop')" in desktop_panel
+    assert 'data-surface-id="editor"' in editor_panel
+    assert "isSurfaceVisible('editor')" in editor_panel
+    assert 'data-surface-id="editor"' in editor_main
+    assert 'data-surface-modal-path="/plugins/_editor/webui/main.html"' in editor_main
+    assert "editor-source-editor" in editor_web_panel
+    assert "data-editor-source" in editor_web_panel
+    assert "editor-tabs" in editor_web_panel
+    assert "editor-new-tab" in editor_web_panel
+    assert 'aria-label="New Markdown"' in editor_web_panel
+    assert "editor-close-confirm" in editor_web_panel
+    assert "Save &amp; Close" in editor_web_panel
+    assert "Close All" in editor_web_panel
+    assert "editor-document-header" not in editor_web_panel
+    assert "editor-document-save-button" not in editor_web_panel
+    assert "data-editor-ace" in editor_web_panel
+    assert "data-editor-preview" in editor_web_panel
+    assert "data-editor-preview-source" in editor_web_panel
+    assert "editor-mode-toggle" in editor_web_panel
+    assert "editor-search-bar" in editor_web_panel
+    assert "editor-preview-title" in editor_web_panel
+    assert "editor-preview-page-editor" in editor_web_panel
+    assert "editor-table-wrap" in editor_web_panel
+    assert "closeAllFiles" in editor_store
+    assert "confirmPendingClose" in editor_store
+    assert "ensureInitialMarkdownFile" in editor_store
+    assert "await this.ensureInitialMarkdownFile();" in editor_store
+    assert "startPreviewEdit" in editor_store
+    assert "applyPreviewEdit" in editor_store
+    assert "previewEditDirty" in editor_store
+    assert "replacePageMarkdown" in editor_store
+    assert "enhanceTaskLists" in editor_store
+    assert "togglePreviewTask" in editor_store
+    assert 'input[type="checkbox"]' in editor_store
+    assert "renderEditorPreviewMarkdown" in editor_store
+    assert "buildMarkdownPages" in editor_store
+    assert "hydrateActiveSession" in editor_store
+    assert "refreshSourceEditorLayout" in editor_store
+    assert "editor.resize?.(true)" in editor_store
+    assert "openSearch" in editor_store
+    assert "handlePreviewClick" in editor_store
+    assert "ace.edit" in editor_store
+    assert "showGutter: false" in editor_store
+    assert "globalThis.confirm" not in editor_store
+    assert ".editor-toolbar" in editor_web_panel
+    assert "overflow: visible;" in editor_web_panel
+    assert "z-index: 10000;" in editor_web_panel
+    assert "renderSafeMarkdown" in editor_preview
+    assert "prepareFootnotes" in editor_preview
+    assert "resolveDocumentRelativePath" in editor_preview
+    assert "slice(start, end)" in editor_preview
+    assert "allowDataImages: true" in editor_preview
+    assert "allowLatex: true" in editor_preview
+    assert "html = sanitizeHtml(html, options);" in safe_markdown
     assert "right-canvas-desktop-actions" in desktop_new_menu
     assert "isSurfaceActive('desktop')" in desktop_new_menu
     assert "runNewMenuAction('writer')" in desktop_new_menu
     assert "runNewMenuAction('spreadsheet')" in desktop_new_menu
     assert "runNewMenuAction('presentation')" in desktop_new_menu
+    assert "runNewMenuAction('markdown')" not in desktop_new_menu
     assert ".right-canvas-header" in right_canvas_css
     assert "overflow: visible;" in right_canvas_css
     assert ".right-canvas-toolbar" in right_canvas_css
@@ -139,13 +220,18 @@ def test_office_frontend_is_document_only_and_does_not_import_browser_or_desktop
     assert "modal-no-backdrop" not in office_modal
     assert "data-canvas-surface" not in office_modal
 
-    assert "office-source-editor" in office_panel
-    assert "data-office-source" in office_panel
-    assert "openRenameModal" in office_store
-    assert "office_save" in office_store
-    assert 'callOffice("renamed"' in office_store
+    assert "office-source-editor" not in office_panel
+    assert "data-office-source" not in office_panel
+    assert "office-document-header" not in office_panel
+    assert "runNewMenuAction('markdown')" not in office_panel
+    assert 'data-office-new-action="markdown"' not in office_store
+    assert "openRenameModal" not in office_store
+    assert "office_save" not in office_store
+    assert 'callOffice("renamed"' not in office_store
+    assert "data-office-source" not in office_store
+    assert "office_input" not in office_store
     assert "requires_desktop" in office_store
-    assert "openSurface(\"desktop\"" in office_store
+    assert "openSurface(\"desktop\"" not in office_store
 
 
 def test_desktop_plugin_owns_routes_runtime_surface_and_state_paths():
@@ -166,9 +252,10 @@ def test_desktop_plugin_owns_routes_runtime_surface_and_state_paths():
 
     assert "virtual_desktop_routes.install_route_hooks()" in desktop_startup
     assert 'action in {"open_document", "document"}' in desktop_api
-    assert "markdown_sessions" in desktop_api
     assert 'if ext == "md":' in desktop_api
-    assert "return self._open_markdown(doc, input, request)" in desktop_api
+    assert "Markdown documents use the Editor surface." in desktop_api
+    assert "return self._open_markdown(doc, input, request)" not in desktop_api
+    assert "markdown_sessions" not in desktop_api
     assert '"status": desktop.get("status") or {}' in desktop_api
     assert 'callJsonApi("/plugins/_desktop/desktop_session"' in desktop_store
     assert 'callDesktop("open_document"' in desktop_store
@@ -240,7 +327,8 @@ def test_document_artifacts_only_open_desktop_from_explicit_document_ui_requests
     document_tool = read("plugins", "_office", "tools", "document_artifact.py")
     office_api = read("plugins", "_office", "api", "office_session.py")
 
-    assert 'openSurface("desktop"' in auto_open
+    assert 'openSurface(surfaceForDocument' in auto_open
+    assert 'return documentExtension(payload, document) === "md" ? "editor" : "desktop";' in auto_open
     assert "isExplicitDocumentUiRequest(payload)" in auto_open
     assert 'action === "open"' in auto_open
     assert "open_in_canvas" in auto_open
@@ -248,13 +336,25 @@ def test_document_artifacts_only_open_desktop_from_explicit_document_ui_requests
     assert 'surfaces.open("desktop"' not in auto_open
     assert "rightCanvas.open" not in auto_open
     assert "globalThis.Alpine" not in auto_open
-    assert "syncDocumentResultsIntoOpenOfficeModal" in auto_open
+    assert "syncDocumentResultsIntoOpenSurfaces" in auto_open
     assert "isOfficeCanvas" not in auto_open
     assert "officeStore" in auto_open
     assert "desktopStore" in auto_open
+    assert "editorStore" in auto_open
+    assert "store?.previewEditDirty" in auto_open
+    assert "syncOpenEditorSurface" in auto_open
+    assert "isEditorSurfaceOpen" in auto_open
     assert "syncOpenDesktopCanvas" in auto_open
     assert "syncOpenOfficeModal" in auto_open
     assert "isDesktopSurfaceOpen" in auto_open
+    assert "function documentTarget(payload = {}, document = {})" in auto_open
+    assert "syncTextEditorMarkdownResult" in auto_open
+    assert "textEditorTarget" in auto_open
+    assert 'toolName === "text_editor"' in auto_open
+    assert 'return ["write", "patch"].includes(action);' in auto_open
+    assert "void syncOpenDocumentSurfaces(target);" in auto_open
+    assert "void syncOpenDocumentSurfaces({ path, file_id: fileId });" not in auto_open
+    assert "return documentExtension(payload, document) === \"md\" ? \"editor\" : \"desktop\";" in auto_open
     assert "hasSameDocument" in auto_open
     assert 'source: "tool-result-sync"' in auto_open
     assert '".modal .office-panel"' not in auto_open
@@ -283,7 +383,10 @@ def test_document_artifacts_only_open_desktop_from_explicit_document_ui_requests
     assert "refreshResponseFileActions" in response_cards
     assert "parseStoredDocuments" in response_cards
     assert "openDocumentInDesktop" in document_actions
+    assert "openDocumentInEditor" in document_actions
     assert "openDocumentArtifact" in document_actions
+    assert 'await openSurface("editor"' in document_actions
+    assert "await openDocumentInEditor(document);" in document_actions
     assert "await openDocumentInDesktop(document);" in document_actions
     assert 'ensureModalOpen("/plugins/_office/webui/main.html")' not in document_actions
     assert 'ensureModalOpen("/plugins/_office/webui/main.html")' not in auto_open
@@ -294,10 +397,12 @@ def test_document_artifacts_only_open_desktop_from_explicit_document_ui_requests
     assert "Details" not in response_cards
     assert "/api/download_work_dir_file" in document_actions
     assert 'openSurface("desktop"' in document_actions
+    assert 'openSurface("editor"' in document_actions
     assert "Open in canvas with Writer" in document_actions
     assert "Open in canvas with Calc" in document_actions
     assert "Open in canvas with Impress" in document_actions
-    assert '"md", "odt", "ods", "odp", "docx", "xlsx", "pptx"' in document_actions
+    assert 'const EDITOR_FORMATS = ["md"]' in document_actions
+    assert 'const DESKTOP_FORMATS = ["odt", "ods", "odp", "docx", "xlsx", "pptx"]' in document_actions
     assert ".document-file-card" in messages_css
     assert ".document-response-file-cards" in messages_css
     assert ".document-file-action-label" not in messages_css
@@ -307,6 +412,64 @@ def test_document_artifacts_only_open_desktop_from_explicit_document_ui_requests
     assert '"open_in_desktop": bool(open_in_desktop)' in document_tool
     assert '"requires_desktop": True' in office_api
     assert 'input.get("open_in_desktop") is not True' in office_api
+    assert '"requires_editor": True' in office_api
+
+
+def test_editor_plugin_owns_markdown_sessions_and_active_context_extras():
+    editor_plugin = PROJECT_ROOT / "plugins" / "_editor"
+    assert (editor_plugin / "plugin.yaml").exists()
+    assert (editor_plugin / "api" / "editor_session.py").exists()
+    assert (editor_plugin / "api" / "ws_editor.py").exists()
+
+    editor_session = read("plugins", "_editor", "helpers", "markdown_sessions.py")
+    editor_api = read("plugins", "_editor", "api", "editor_session.py")
+    editor_ws = read("plugins", "_editor", "api", "ws_editor.py")
+    editor_context = read("plugins", "_editor", "helpers", "open_files_context.py")
+    office_ws = read("plugins", "_office", "api", "ws_office.py")
+    office_markdown_sessions = read("plugins", "_office", "helpers", "markdown_sessions.py")
+    editor_extras = read(
+        "plugins",
+        "_editor",
+        "extensions",
+        "python",
+        "message_loop_prompts_after",
+        "_55_include_editor_open_files.py",
+    )
+    desktop_context = read(
+        "plugins",
+        "_desktop",
+        "extensions",
+        "python",
+        "message_loop_prompts_after",
+        "_55_include_desktop_state.py",
+    )
+    office_context = read(
+        "plugins",
+        "_office",
+        "extensions",
+        "python",
+        "message_loop_prompts_after",
+        "_55_include_office_canvas_context.py",
+    )
+
+    assert "context_id: str" in editor_session
+    assert "self._active_by_context" in editor_session
+    assert "def list_open" in editor_session
+    assert "session.context_id == context_id" in editor_session
+    assert "dirty" in editor_session
+    assert "active" in editor_session
+    assert 'action == "list"' in editor_api
+    assert 'action == "activate"' in editor_api
+    assert 'event == "editor_activate"' in editor_ws
+    assert "[EDITOR OPEN FILES]" in read("plugins", "_editor", "prompts", "agent.extras.editor_open_files.md")
+    assert "Content is omitted" in editor_context
+    assert "self.agent.context.id" in editor_extras
+    assert "editor_open_files" in editor_extras
+    assert "desktop_state" in desktop_context
+    assert 'pop("office_canvas"' in office_context
+    assert "Markdown editing moved to /plugins/_editor." in office_ws
+    assert "from plugins._office.helpers import document_store, markdown_sessions" not in office_ws
+    assert "from plugins._editor.helpers.markdown_sessions import" in office_markdown_sessions
 
 
 def test_office_and_desktop_skills_are_rehomed_and_renamed():
