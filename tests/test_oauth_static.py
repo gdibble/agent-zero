@@ -19,7 +19,11 @@ def test_oauth_settings_exposes_provider_cards_and_model_slots():
     assert "provider_map" in store_js
     assert "<h3>Accounts</h3>" not in config_html
     assert "oauth-plan-catalog" not in config_html
-    assert "oauth-model-provider-choice" not in config_html
+    assert "oauth-model-provider-field" in config_html
+    assert "slotProviderChoices(slot.key)" in config_html
+    assert "connectedProviderCards().length" in config_html
+    assert "useProviderForSlot(slot.key, $event.target.value)" in config_html
+    assert "slotCanUseModels(slot.key)" in config_html
     assert "<span>Account</span>" not in config_html
     assert "oauth-connected-panel" not in config_html
     assert "oauth-provider-usage" in config_html
@@ -48,12 +52,18 @@ def test_oauth_settings_exposes_provider_specific_controls_and_generic_copy():
     assert "supports_quota_project" in config_html + store_js
     assert "OAuth client ID" in config_html
     assert "quota_project_id" in config_html + store_js
-    assert "submitManualCallback($store.oauthConfig.selectedProviderId)" in config_html
-    assert "cancelConnect($store.oauthConfig.selectedProviderId)" in config_html
+    assert "providerDetailOpen(card.provider_id)" in config_html + store_js
+    assert "providerDevice(card.provider_id)?.user_code" in config_html
+    assert "submitManualCallback(card.provider_id)" in config_html
+    assert "cancelConnect(card.provider_id)" in config_html
+    assert "selectedProvider()" not in config_html
     assert "oauth-auth-attempt" in config_html
+    assert "oauth-provider-row-detail" in config_html
+    assert "oauth-provider-detail" not in config_html
     assert "oauth-detail-metrics" not in config_html
     assert "Codex/ChatGPT Account" not in config_html + store_js
-    assert "Available models from selected provider" in config_html
+    assert "activeModelsDescription()" in config_html + store_js
+    assert "activeProviderModels()" in config_html + store_js
     assert "Available models from Codex account" not in config_html
     assert "disconnectProvider(card.provider_id)" in config_html
     assert "disconnectProvider($store.oauthConfig.selectedProviderId)" not in config_html
@@ -78,12 +88,13 @@ def test_oauth_connect_buttons_disable_during_any_provider_connection():
 def test_oauth_available_models_list_sits_above_advanced_without_borders():
     config_html = (PROJECT_ROOT / "plugins/_oauth/webui/config.html").read_text(encoding="utf-8")
 
-    assert "Available models from selected provider" in config_html
+    assert "activeModelsDescription()" in config_html
     assert config_html.index("<h3>Providers</h3>") < config_html.index("Choose your models")
     assert config_html.index("<h3>Providers</h3>") < config_html.index("<summary>Advanced</summary>")
     assert config_html.index("Available models") < config_html.index("<summary>Advanced</summary>")
     assert ".oauth-models-panel {\n      display: grid;\n      gap: 10px;\n      padding: 0;\n      border: 0;\n    }" in config_html
-    assert ".oauth-provider-list,\n    .oauth-provider-detail {\n      display: grid;\n      gap: 12px;\n      padding: 0;\n      border: 0;" in config_html
+    assert ".oauth-provider-list {\n      display: grid;\n      gap: 12px;\n      padding: 0;\n      border: 0;" in config_html
+    assert ".oauth-provider-row-detail {\n      display: grid;\n      grid-column: 1 / -1;" in config_html
     assert ".oauth-advanced {\n      border: 0;\n      border-radius: 0;\n      padding: 0;\n    }" in config_html
     model_chip_rule = config_html.split(".oauth-models span {", 1)[1].split("}", 1)[0]
     assert "border:" not in model_chip_rule
@@ -99,6 +110,12 @@ def test_oauth_model_slots_reuse_model_config_api():
     assert "isOauthProvider" in store_js
     assert "providerCards()" in store_js
     assert "saveModelConfigIfDirty" in store_js
+    assert "slotProviderChoices()" in store_js
+    assert "modelProviderOptionLabel(provider)" in store_js
+    assert "return this.connectedProviderCards();" in store_js
+    assert "if (!this.providerConnected(providerId)) return;" in store_js
+    assert "const providerId = slot.provider;" in store_js
+    assert "const providerId = this.isOauthProvider(this.activeModelProvider)" not in store_js
 
 
 def test_browser_callback_completion_is_observed_from_modal():
@@ -107,6 +124,21 @@ def test_browser_callback_completion_is_observed_from_modal():
     assert "startCallbackPolling(providerId)" in store_js
     assert "stopCallbackPolling(providerId)" in store_js
     assert "this.providerConnected(providerId)" in store_js
+
+
+def test_device_polling_honors_provider_interval_updates():
+    store_js = (PROJECT_ROOT / "plugins/_oauth/webui/oauth-config-store.js").read_text(encoding="utf-8")
+
+    start_polling = store_js.split("startPolling(providerId = CODEX_PROVIDER)", 1)[1].split(
+        "pollProvider(providerId = CODEX_PROVIDER)",
+        1,
+    )[0]
+    assert "window.setTimeout(tick, delayMs)" in start_polling
+    assert "window.setInterval(tick" not in start_polling
+    assert "void tick();" not in start_polling
+    assert "interval: response.interval || device.interval" in start_polling
+    assert "expires_at: response.expires_at || device.expires_at" in start_polling
+    assert "Date.now() / 1000 > expiresAt" in start_polling
 
 
 def test_usage_plan_catalog_stays_backend_only_on_oauth_settings_page():

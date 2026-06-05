@@ -299,6 +299,34 @@ export const store = createStore("oauthConfig", {
     return status.account_label || status.email || "Connected";
   },
 
+  providerDevice(providerId) {
+    return this.devices[String(providerId || "")] || null;
+  },
+
+  providerShowSetupFields(providerId) {
+    if (this.providerConnected(providerId)) return false;
+    if (this.providerDevice(providerId)) return false;
+    return this.selectedProviderId === providerId;
+  },
+
+  providerShowNote(providerId) {
+    if (this.providerConnected(providerId)) return false;
+    const status = this.providerStatus(providerId);
+    return this.selectedProviderId === providerId && Boolean(status.warning || status.note);
+  },
+
+  providerDetailOpen(providerId) {
+    if (!this.isOauthProvider(providerId) || this.providerConnected(providerId)) return false;
+    if (this.providerDevice(providerId)) return true;
+    const status = this.providerStatus(providerId);
+    return this.selectedProviderId === providerId && Boolean(
+      status.supports_enterprise_domain
+      || status.supports_oauth_client_config
+      || status.warning
+      || status.note
+    );
+  },
+
   providerReadinessLabel(providerId) {
     const status = this.providerStatus(providerId);
     if (this.loadingStatus) return "Checking";
@@ -504,10 +532,33 @@ export const store = createStore("oauthConfig", {
     return found?.label || this.providerLabel(provider);
   },
 
+  slotProviderChoices() {
+    return this.connectedProviderCards();
+  },
+
+  modelProviderOptionLabel(provider) {
+    return provider?.display_name || provider?.short_name || provider?.provider_id || "Connected account";
+  },
+
   slotStatusLabel(key) {
     const slot = this.modelSlot(key);
-    if (this.slotUsesOauth(key)) return `Using ${this.providerLabel(slot.provider)}`;
+    if (this.slotUsesOauth(key)) return "";
     return `Currently ${this.providerName(slot.provider)}`;
+  },
+
+  slotCanUseModels(key) {
+    const providerId = this.modelSlot(key).provider;
+    return this.isOauthProvider(providerId) && this.providerConnected(providerId);
+  },
+
+  activeProviderModels() {
+    if (!this.providerConnected(this.activeModelProvider)) return [];
+    return this.providerModels[this.activeModelProvider] || [];
+  },
+
+  activeModelsDescription() {
+    if (!this.providerConnected(this.activeModelProvider)) return "";
+    return `Available models from ${this.providerLabel(this.activeModelProvider)}`;
   },
 
   markModelDirty(key) {
@@ -516,7 +567,7 @@ export const store = createStore("oauthConfig", {
   },
 
   useProviderForSlot(key, providerId) {
-    if (!this.isOauthProvider(providerId)) return;
+    if (!this.providerConnected(providerId)) return;
     const slot = this.modelSlot(key);
     const previousProvider = slot.provider;
     slot.provider = providerId;
@@ -526,7 +577,7 @@ export const store = createStore("oauthConfig", {
     }
     if (!slot.kwargs || typeof slot.kwargs !== "object") slot.kwargs = {};
     this.activeModelProvider = providerId;
-    this.models = this.providerModels[providerId] || [];
+    this.models = this.activeProviderModels();
     this.markModelDirty(key);
     if (this.models.length) {
       this.openModelDropdown(key);
@@ -544,14 +595,15 @@ export const store = createStore("oauthConfig", {
     utility.api_base = main.api_base || "";
     utility.kwargs = clone(main.kwargs || {});
     this.activeModelProvider = utility.provider || this.activeModelProvider;
+    this.models = this.activeProviderModels();
     this.markModelDirty("utility_model");
   },
 
   openModelDropdown(key) {
-    if (!this.slotUsesOauth(key)) return;
+    if (!this.slotCanUseModels(key)) return;
     const providerId = this.modelSlot(key).provider;
     this.activeModelProvider = providerId;
-    this.models = this.providerModels[providerId] || [];
+    this.models = this.activeProviderModels();
     this.modelDropdown[key] = { ...this.modelDropdown[key], open: true };
     if (!this.models.length && !this.loadingModelsProvider && this.providerConnected(providerId)) {
       void this.loadModels({ providerId, openDropdown: key, silent: true });
@@ -565,7 +617,7 @@ export const store = createStore("oauthConfig", {
   filteredModels(key) {
     const slot = this.modelSlot(key);
     const query = String(slot.name || "").trim().toLowerCase();
-    const models = this.providerModels[slot.provider] || this.models || [];
+    const models = this.providerModels[slot.provider] || [];
     const filtered = query
       ? models.filter((model) => String(model).toLowerCase().includes(query))
       : models;
@@ -574,13 +626,11 @@ export const store = createStore("oauthConfig", {
 
   selectModel(key, model) {
     const slot = this.modelSlot(key);
-    const providerId = this.isOauthProvider(this.activeModelProvider)
-      ? this.activeModelProvider
-      : slot.provider;
-    if (this.isOauthProvider(providerId)) {
-      slot.provider = providerId;
-    }
+    const providerId = slot.provider;
+    if (!this.providerConnected(providerId)) return;
     slot.name = model;
+    this.activeModelProvider = providerId;
+    this.models = this.activeProviderModels();
     this.markModelDirty(key);
     this.closeModelDropdown(key);
   },
@@ -638,8 +688,11 @@ export const store = createStore("oauthConfig", {
           ui.quota_project_id = card.quota_project_id;
         }
       }
-      if (!this.isOauthProvider(this.activeModelProvider)) {
-        this.activeModelProvider = this.providerCards()[0]?.provider_id || CODEX_PROVIDER;
+      if (!this.providerConnected(this.activeModelProvider)) {
+        this.activeModelProvider = this.connectedProviderCards()[0]?.provider_id
+          || this.providerCards()[0]?.provider_id
+          || CODEX_PROVIDER;
+        this.models = this.activeProviderModels();
       }
       if (!this.isOauthProvider(this.selectedProviderId)) {
         this.selectedProviderId = this.connectedProviderCards()[0]?.provider_id
@@ -705,9 +758,23 @@ export const store = createStore("oauthConfig", {
   startPolling(providerId = CODEX_PROVIDER) {
     this.stopPolling(providerId);
     this.pollStartedAt = { ...this.pollStartedAt, [providerId]: Date.now() };
+    const clearTimer = () => {
+      if (this.pollTimers[providerId]) window.clearTimeout(this.pollTimers[providerId]);
+      const timers = { ...this.pollTimers };
+      delete timers[providerId];
+      this.pollTimers = timers;
+      if (providerId === CODEX_PROVIDER) this.pollTimer = null;
+    };
+    const schedule = (delayMs) => {
+      clearTimer();
+      this.pollTimers = { ...this.pollTimers, [providerId]: window.setTimeout(tick, delayMs) };
+      if (providerId === CODEX_PROVIDER) this.pollTimer = this.pollTimers[providerId];
+    };
     const tick = async () => {
+      clearTimer();
       const device = this.devices[providerId];
       if (!device?.attempt_id) return;
+      let nextDelay = Math.max(1500, Number(device.interval || 5) * 1000);
       try {
         const response = await callJsonApi(POLL_LOGIN_API, {
           provider_id: providerId,
@@ -729,6 +796,16 @@ export const store = createStore("oauthConfig", {
           void toastFrontendSuccess(`${this.providerLabel(providerId)} connected.`, "OAuth Connections");
           return;
         }
+        if (response.interval || response.expires_at) {
+          const updatedDevice = {
+            ...device,
+            interval: response.interval || device.interval,
+            expires_at: response.expires_at || device.expires_at,
+          };
+          this.devices = { ...this.devices, [providerId]: updatedDevice };
+          if (providerId === CODEX_PROVIDER) this.device = updatedDevice;
+          nextDelay = Math.max(1500, Number(updatedDevice.interval || 5) * 1000);
+        }
       } catch (error) {
         if (this.connectingProvider === providerId) this.connectingProvider = "";
         this.connecting = Boolean(this.connectingProvider);
@@ -736,17 +813,21 @@ export const store = createStore("oauthConfig", {
         void toastFrontendError(messageOf(error), "OAuth Connections");
         return;
       }
-      if (Date.now() - Number(this.pollStartedAt[providerId] || 0) > MAX_POLL_MS) {
+      const expiresAt = Number(this.devices[providerId]?.expires_at || 0);
+      const timedOut = expiresAt > 0
+        ? Date.now() / 1000 > expiresAt
+        : Date.now() - Number(this.pollStartedAt[providerId] || 0) > MAX_POLL_MS;
+      if (timedOut) {
         if (this.connectingProvider === providerId) this.connectingProvider = "";
         this.connecting = Boolean(this.connectingProvider);
         this.clearProviderDevice(providerId);
         this.stopPolling(providerId);
+        return;
       }
+      schedule(nextDelay);
     };
-    const delay = Math.max(1500, Number(this.devices[providerId]?.interval || 5) * 1000);
-    this.pollTimers = { ...this.pollTimers, [providerId]: window.setInterval(tick, delay) };
-    if (providerId === CODEX_PROVIDER) this.pollTimer = this.pollTimers[providerId];
-    void tick();
+    const initialDelay = Math.max(1500, Number(this.devices[providerId]?.interval || 5) * 1000);
+    schedule(initialDelay);
   },
 
   pollProvider(providerId = CODEX_PROVIDER) {
@@ -781,7 +862,7 @@ export const store = createStore("oauthConfig", {
 
   stopPolling(providerId = "") {
     if (providerId) {
-      if (this.pollTimers[providerId]) window.clearInterval(this.pollTimers[providerId]);
+      if (this.pollTimers[providerId]) window.clearTimeout(this.pollTimers[providerId]);
       const timers = { ...this.pollTimers };
       delete timers[providerId];
       this.pollTimers = timers;
@@ -793,7 +874,7 @@ export const store = createStore("oauthConfig", {
     }
 
     for (const timer of Object.values(this.pollTimers || {})) {
-      if (timer) window.clearInterval(timer);
+      if (timer) window.clearTimeout(timer);
     }
     this.pollTimers = {};
     this.pollStartedAt = {};

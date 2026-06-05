@@ -6,6 +6,10 @@ Tokens in `auth.json` are password-equivalent credentials. Keep this plugin on t
 
 The settings UI groups providers as account-backed connections. More than one account provider can be connected at the same time, and the Main/Utility model slots can choose models from any connected OAuth provider.
 
+Each model slot has its own provider selector. The selector lists connected OAuth accounts only, so Main and Utility can use different account-backed providers when more than one account is connected.
+
+OAuth-backed model providers do not require users to enter API keys. Agent Zero supplies a local dummy key only at runtime after the selected account provider is connected, so unconnected providers stay blank in API-key surfaces.
+
 ## Providers
 
 ### Codex/ChatGPT (`codex_oauth`)
