@@ -1,6 +1,7 @@
 import { createStore } from "/js/AlpineStore.js";
 import * as shortcuts from "/js/shortcuts.js";
 import { store as fileBrowserStore } from "/components/modals/file-browser/file-browser-store.js";
+import { openLatest as openLatestSurface } from "/js/surfaces.js";
 import { store as messageQueueStore } from "/components/chat/message-queue/message-queue-store.js";
 import { store as attachmentsStore } from "/components/chat/attachments/attachmentsStore.js";
 import { store as chatsStore } from "/components/sidebar/chats/chats-store.js";
@@ -56,6 +57,7 @@ const model = {
   chatMoreMenuOpen: false,
   progressText: "",
   progressActive: false,
+  _caretIndex: 0,
 
   toggleChatMoreMenu() {
     this.chatMoreMenuOpen = !this.chatMoreMenuOpen;
@@ -76,14 +78,20 @@ const model = {
   },
 
   get inputPlaceholder() {
+    if (!chatsStore.selected) return "Ask anything to start a new chat";
     const state = this._getSendState();
     if (state === "all") return "Press Enter to send queued messages";
     if (this.showProgressPlaceholder) return "";
     return "Type your message here...";
   },
 
+  get isCodeContext() {
+    return this._isCaretInsideFence(this.message, this._caretIndex);
+  },
+
   get showProgressPlaceholder() {
     return (
+      !!chatsStore.selected &&
       this._getSendState() !== "all" &&
       !!this.progressText &&
       !this.message
@@ -102,7 +110,7 @@ const model = {
     const state = this._getSendState();
     if (state === "all") return "send_and_archive";
     if (state === "queue") return "schedule_send";
-    return "send";
+    return "arrow_forward";
   },
 
   // Computed: send button CSS class
@@ -129,15 +137,59 @@ const model = {
   async sendMessage() {
     // Capture sent prompt to per-chat history (bash-style)
     try { this._pushHistory(this.message); } catch (_e) { /* ignore */ }
+
+    if (!chatsStore.selected && (this.message.trim() || attachmentsStore?.attachments?.length > 0)) {
+      const ctxid = await chatsStore.newChat();
+      if (!ctxid && !chatsStore.selected) return;
+    }
+
     // Delegate to the global function
     if (globalThis.sendMessage) {
       await globalThis.sendMessage();
     }
   },
 
-  adjustTextareaHeight() {
-    const chatInput = document.getElementById("chat-input");
-    if (chatInput) {
+  _composerTextareas(target = null) {
+    if (target?.tagName === "TEXTAREA") return [target];
+    return ["chat-input"]
+      .map((id) => document.getElementById(id))
+      .filter(Boolean);
+  },
+
+  _activeTextarea() {
+    const active = document.activeElement;
+    if (active?.id === "chat-input") {
+      return active;
+    }
+    return document.getElementById("chat-input");
+  },
+
+  _syncCaretFromEvent($event = null) {
+    const ta = ($event && $event.target?.tagName === "TEXTAREA")
+      ? $event.target
+      : this._activeTextarea();
+    if (!ta) {
+      this._caretIndex = this.message.length;
+      return;
+    }
+    this._caretIndex = Number.isFinite(ta.selectionStart) ? ta.selectionStart : this.message.length;
+  },
+
+  _isCaretInsideFence(text, index) {
+    const source = String(text || "");
+    const caret = Math.max(0, Math.min(source.length, Number(index) || 0));
+    const matches = source.slice(0, caret).match(/```/g);
+    return Boolean(matches && matches.length % 2 === 1);
+  },
+
+  handleInput($event) {
+    this._syncCaretFromEvent($event);
+    this.adjustTextareaHeight($event);
+  },
+
+  adjustTextareaHeight($event = null) {
+    const target = $event?.target || null;
+    for (const chatInput of this._composerTextareas(target)) {
       if (!this.message) chatInput.value = "";
       chatInput.style.height = "auto";
       chatInput.style.height = chatInput.scrollHeight + "px";
@@ -280,11 +332,17 @@ const model = {
         }
       }
     }
-    await fileBrowserStore.open(path);
+    let opened = false;
+    try {
+      opened = await openLatestSurface("files", { path, source: "sidebar" });
+    } catch (error) {
+      console.error("Error opening Files surface", error);
+    }
+    if (!opened) await fileBrowserStore.open(path);
   },
 
   focus() {
-    const chatInput = document.getElementById("chat-input");
+    const chatInput = this._activeTextarea();
     if (chatInput) {
       chatInput.focus();
     }
@@ -379,10 +437,11 @@ const model = {
 
   _setCaretStart() {
     queueMicrotask(() => {
-      const ta = document.getElementById("chat-input");
+      const ta = this._activeTextarea();
       if (ta) {
         try { ta.setSelectionRange(0, 0); } catch (_e) { /* ignore */ }
         try { ta.scrollTop = 0; } catch (_e) { /* ignore */ }
+        this._syncCaretFromEvent({ target: ta });
       }
       this.adjustTextareaHeight();
     });
@@ -390,11 +449,12 @@ const model = {
 
   _setCaretEnd() {
     queueMicrotask(() => {
-      const ta = document.getElementById("chat-input");
+      const ta = this._activeTextarea();
       if (ta) {
         const end = ta.value.length;
         try { ta.setSelectionRange(end, end); } catch (_e) { /* ignore */ }
         try { ta.scrollTop = ta.scrollHeight; } catch (_e) { /* ignore */ }
+        this._syncCaretFromEvent({ target: ta });
       }
       this.adjustTextareaHeight();
     });
@@ -402,7 +462,7 @@ const model = {
 
   historyPrev($event) {
     if ($event && ($event.isComposing || $event.keyCode === 229)) return;
-    const ta = ($event && $event.target) ? $event.target : document.getElementById("chat-input");
+    const ta = ($event && $event.target) ? $event.target : this._activeTextarea();
     if (!ta) return;
     const start = ta.selectionStart;
     const end = ta.selectionEnd;
@@ -424,7 +484,7 @@ const model = {
 
   historyNext($event) {
     if ($event && ($event.isComposing || $event.keyCode === 229)) return;
-    const ta = ($event && $event.target) ? $event.target : document.getElementById("chat-input");
+    const ta = ($event && $event.target) ? $event.target : this._activeTextarea();
     if (!ta) return;
     const value = ta.value;
     const start = ta.selectionStart;
@@ -447,6 +507,7 @@ const model = {
     this.message = "";
     attachmentsStore.clearAttachments();
     this.chatMoreMenuOpen = false;
+    this._caretIndex = 0;
     this._historyIndex = null;
     this._draft = "";
     this.adjustTextareaHeight();
