@@ -78,6 +78,32 @@ def test_extract_json_root_string_returns_canonical_snapshot():
     assert extract_tools.extract_json_root_string('[{"tool_name":"response"}]') is None
 
 
+def test_json_parse_dirty_prefers_valid_tool_request_after_preamble_object():
+    text = (
+        'I will call the tool after this note {"note":"not the tool"}.\n'
+        '{"tool_name":"response","tool_args":{"text":"ok"}} trailing text'
+    )
+
+    assert extract_tools.json_parse_dirty(text) == {
+        "tool_name": "response",
+        "tool_args": {"text": "ok"},
+    }
+
+
+def test_extract_json_root_string_prefers_valid_tool_request():
+    text = (
+        'I will call the tool after this note {"note":"not the tool"}.\n'
+        '{"tool_name":"response","tool_args":{"text":"ok"}} trailing text'
+    )
+
+    assert extract_tools.extract_json_root_string(text) == (
+        '{"tool_name":"response","tool_args":{"text":"ok"}}'
+    )
+    assert extract_tools.extract_json_root_string(
+        'Only a note {"note":"not the tool"}'
+    ) == '{"note":"not the tool"}'
+
+
 def test_litellm_global_kwargs_merge_defaults_and_config(monkeypatch):
     monkeypatch.setattr(
         models.settings,
@@ -228,6 +254,76 @@ async def test_unified_call_stops_after_canonical_root_snapshot(monkeypatch):
     assert stream.closed is True
     assert len(seen) == 1
     assert seen[0][1] == '{"tool_name":"response","tool_args":{"text":"hello"}} trailing text'
+
+
+@pytest.mark.asyncio
+async def test_unified_call_stops_after_tool_root_with_incidental_json(monkeypatch):
+    stream = _AsyncChunkStream(
+        [
+            {"type": "response.created"},
+            _response_event('Preamble {"note":"not the tool"}.\n'),
+            _response_event(
+                '{"tool_name":"response","tool_args":{"text":"ok"}} trailing text'
+            ),
+            _response_event(" unreachable"),
+        ]
+    )
+
+    async def fake_aresponses(*args, **kwargs):
+        assert kwargs["stream"] is True
+        assert kwargs["input"] == ""
+        assert kwargs["store"] is True
+        return stream
+
+    async def fake_rate_limiter(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(litellm_transport, "aresponses", fake_aresponses)
+    monkeypatch.setattr(models, "apply_rate_limiter", fake_rate_limiter)
+    monkeypatch.setattr(
+        models.settings,
+        "get_settings",
+        lambda: {"litellm_global_kwargs": {}},
+    )
+
+    wrapper = models.LiteLLMChatWrapper(
+        model="test-model",
+        provider="openai",
+        model_config=None,
+    )
+
+    seen: list[tuple[str, str]] = []
+
+    async def response_callback(chunk: str, full: str):
+        seen.append((chunk, full))
+        snapshot = extract_tools.extract_json_root_string(full)
+        if not snapshot:
+            return None
+        parsed_snapshot = extract_tools.json_parse_dirty(snapshot)
+        if parsed_snapshot is None:
+            return None
+        try:
+            extract_tools.normalize_tool_request(parsed_snapshot)
+        except ValueError:
+            return None
+        return snapshot
+
+    response, reasoning = await wrapper.unified_call(
+        messages=[],
+        response_callback=response_callback,
+    )
+
+    assert response == '{"tool_name":"response","tool_args":{"text":"ok"}}'
+    assert reasoning == ""
+    assert stream.index == 3
+    assert stream.closed is True
+    assert len(seen) == 2
+    assert seen[0][1] == 'Preamble {"note":"not the tool"}.\n'
+    assert (
+        seen[1][1]
+        == 'Preamble {"note":"not the tool"}.\n'
+        '{"tool_name":"response","tool_args":{"text":"ok"}} trailing text'
+    )
 
 
 @pytest.mark.asyncio
@@ -458,6 +554,106 @@ async def test_unified_call_falls_back_when_litellm_hides_responses_404_url(
 
 
 @pytest.mark.asyncio
+async def test_unified_call_falls_back_when_responses_bad_request_rejects_shape(
+    monkeypatch,
+):
+    class BadRequestError(Exception):
+        status_code = 400
+
+    calls: list[str] = []
+
+    async def fake_aresponses(*args, **kwargs):
+        calls.append("responses")
+        raise BadRequestError(
+            'BadRequestError: Zod validation error: input_image Expected object, '
+            'received string; Expected string, received array'
+        )
+
+    async def fake_acompletion(*args, **kwargs):
+        calls.append("chat")
+        assert kwargs["stream"] is True
+        assert kwargs["drop_params"] is True
+        return _AsyncChunkStream([_chunk("fallback")])
+
+    async def fake_rate_limiter(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(litellm_transport, "aresponses", fake_aresponses)
+    monkeypatch.setattr(litellm_transport, "acompletion", fake_acompletion)
+    monkeypatch.setattr(models, "apply_rate_limiter", fake_rate_limiter)
+
+    wrapper = models.LiteLLMChatWrapper(
+        model="venice-model",
+        provider="openai",
+        model_config=None,
+    )
+
+    async def response_callback(chunk: str, full: str):
+        return None
+
+    response, reasoning = await wrapper.unified_call(
+        messages=[
+            HumanMessage(
+                content=[
+                    {"type": "text", "text": "describe it"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.test/a.png"},
+                    },
+                ]
+            )
+        ],
+        response_callback=response_callback,
+    )
+
+    assert response == "fallback"
+    assert reasoning == ""
+    assert calls == ["responses", "chat"]
+
+
+@pytest.mark.asyncio
+async def test_unified_call_raises_generic_responses_bad_request(monkeypatch):
+    class BadRequestError(Exception):
+        status_code = 400
+
+    calls: list[str] = []
+
+    async def fake_aresponses(*args, **kwargs):
+        calls.append("responses")
+        raise BadRequestError(
+            "BadRequestError: validation error: invalid request: max_tokens is too high"
+        )
+
+    async def fake_acompletion(*args, **kwargs):
+        calls.append("chat")
+        raise AssertionError("generic 400 should not fallback to chat")
+
+    async def fake_rate_limiter(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(litellm_transport, "aresponses", fake_aresponses)
+    monkeypatch.setattr(litellm_transport, "acompletion", fake_acompletion)
+    monkeypatch.setattr(models, "apply_rate_limiter", fake_rate_limiter)
+
+    wrapper = models.LiteLLMChatWrapper(
+        model="test-model",
+        provider="openai",
+        model_config=None,
+    )
+
+    async def response_callback(chunk: str, full: str):
+        return None
+
+    with pytest.raises(BadRequestError):
+        await wrapper.unified_call(
+            messages=[],
+            response_callback=response_callback,
+        )
+
+    assert calls == ["responses"]
+
+
+@pytest.mark.asyncio
 async def test_unified_call_preserves_cache_control_with_chat_for_non_native_responses(
     monkeypatch,
 ):
@@ -584,7 +780,7 @@ def test_responses_request_translates_messages_and_params():
             "type": "function",
             "name": "lookup",
             "description": "Search",
-            "parameters": {"type": "object"},
+            "parameters": {"type": "object", "properties": {}},
             "strict": True,
         }
     ]
@@ -641,6 +837,61 @@ def test_responses_request_normalizes_reasoning_and_orphan_tool_choice():
     )
 
     assert "reasoning" not in request
+
+
+def test_responses_request_normalizes_function_tool_parameter_shapes():
+    request = litellm_transport.ResponsesTransport.from_chat(
+        [],
+        {
+            "functions": [
+                {
+                    "name": "legacy_noop",
+                    "description": "Legacy function",
+                    "parameters": {},
+                }
+            ],
+        },
+    )
+
+    assert request["tools"] == [
+        {
+            "type": "function",
+            "name": "legacy_noop",
+            "description": "Legacy function",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        }
+    ]
+
+    request = litellm_transport.ResponsesTransport.from_chat(
+        [],
+        {
+            "a0_responses_function_tools": [
+                {
+                    "type": "function",
+                    "name": "native_noop",
+                    "description": "Native function",
+                    "parameters": {"type": "object"},
+                }
+            ],
+            "responses_builtin_tools": [{"type": "web_search"}],
+        },
+    )
+
+    assert request["tools"] == [
+        {
+            "type": "function",
+            "name": "native_noop",
+            "description": "Native function",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        {"type": "web_search"},
+    ]
 
 
 def test_chat_completions_kwargs_omit_empty_tools():

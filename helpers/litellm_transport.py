@@ -640,13 +640,11 @@ class ResponsesTransport:
         response_builtin_tools: Any = None,
     ) -> list[Any]:
         merged: list[Any] = []
-        if isinstance(tools, list):
-            merged.extend(tools)
-        elif tools:
-            merged.append(tools)
-
-        for source in (response_function_tools, response_builtin_tools):
-            for tool in _as_list(source):
+        for source in (tools, response_function_tools, response_builtin_tools):
+            source_tools = (
+                source if isinstance(source, list) else [source] if source else []
+            )
+            for tool in source_tools:
                 normalized = cls.normalize_response_tool(tool)
                 if normalized:
                     merged.append(normalized)
@@ -658,7 +656,12 @@ class ResponsesTransport:
             tool = {"type": tool}
         if not isinstance(tool, dict):
             return None
-        return dict(tool)
+        normalized = dict(tool)
+        if normalized.get("type") == "function":
+            normalized["parameters"] = _normalize_function_parameters(
+                normalized.get("parameters")
+            )
+        return normalized
 
     @staticmethod
     def prepare_prompt_caching(
@@ -800,7 +803,9 @@ class ResponsesTransport:
                     "type": "function",
                     "name": function.get("name", ""),
                     "description": function.get("description", ""),
-                    "parameters": function.get("parameters", {}),
+                    "parameters": _normalize_function_parameters(
+                        function.get("parameters")
+                    ),
                 }
                 if "strict" in function:
                     response_tool["strict"] = function["strict"]
@@ -1206,6 +1211,23 @@ def _response_tool_type(tool: Any) -> str:
     return ""
 
 
+def _normalize_function_parameters(parameters: Any) -> dict[str, Any]:
+    if not isinstance(parameters, dict):
+        return _permissive_function_parameters()
+
+    normalized = dict(parameters)
+    normalized.setdefault("type", "object")
+    if normalized.get("type") == "object" and not isinstance(
+        normalized.get("properties"), dict
+    ):
+        normalized["properties"] = {}
+    return normalized or _permissive_function_parameters()
+
+
+def _permissive_function_parameters() -> dict[str, Any]:
+    return {"type": "object", "properties": {}, "additionalProperties": True}
+
+
 def apply_chat_prompt_cache_markers(
     messages: list[dict[str, Any]],
     *,
@@ -1524,6 +1546,8 @@ def _is_responses_not_supported_error(exc: Exception) -> bool:
     text = _exception_text(exc).lower()
     if any(marker in text for marker in ("429", "too many requests", "rate limit")):
         return False
+    if _is_bad_request_error(exc) and _looks_like_responses_request_rejected(text):
+        return True
     if _is_not_found_error(exc) and _looks_like_responses_endpoint_not_found(text):
         return True
     if "/v1/responses" in text and any(
@@ -1549,6 +1573,34 @@ def _is_not_found_error(exc: Exception) -> bool:
     if _exception_status_code(exc) == 404:
         return True
     return "notfounderror" in _exception_type_chain(exc).lower()
+
+
+def _is_bad_request_error(exc: Exception) -> bool:
+    if _exception_status_code(exc) == 400:
+        return True
+    type_chain = _exception_type_chain(exc).lower()
+    if "badrequesterror" in type_chain:
+        return True
+    text = _exception_text(exc).lower()
+    return "400" in text and "bad request" in text
+
+
+def _looks_like_responses_request_rejected(text: str) -> bool:
+    if "/v1/responses" in text or "responses api" in text:
+        return True
+    return any(
+        marker in text
+        for marker in (
+            "input_image",
+            "response.input",
+            "expected object, received string",
+            "expected string, received array",
+            "zod",
+            "failed to deserialize input",
+            "failed to deserialize response",
+            "failed to deserialize responses",
+        )
+    )
 
 
 def _looks_like_responses_endpoint_not_found(text: str) -> bool:

@@ -25,6 +25,7 @@ CONTEXT_DATA_NAME_LOADED_SKILLS = AGENT_DATA_NAME_LOADED_SKILLS
 CONTEXT_DATA_NAME_CHAT_ACTIVE_SKILLS = "skills_chat_active"
 CONTEXT_DATA_NAME_CHAT_DISABLED_SKILLS = "skills_chat_disabled"
 CONTEXT_DATA_NAME_CHAT_VISIBLE_SKILLS = "skills_chat_visible"
+_WARNED_SKILL_PARSE_PATHS: set[Path] = set()
 
 
 class ActiveSkillEntry(TypedDict, total=False):
@@ -254,6 +255,47 @@ def parse_frontmatter(frontmatter_text: str) -> Tuple[Dict[str, Any], List[str]]
     return parsed, errors
 
 
+def _emit_skill_scan_warning(message: str) -> None:
+    try:
+        from helpers.print_style import PrintStyle
+
+        PrintStyle.warning(message)
+    except Exception:
+        print(f"Warning: {message}")
+
+
+def _frontmatter_error_line(lines: List[str], error: str) -> int | None:
+    if not lines:
+        return 1
+
+    if error.startswith("Frontmatter must start"):
+        for index, line in enumerate(lines, start=1):
+            if line.strip():
+                return index
+        return 1
+    if error.startswith("Missing YAML frontmatter"):
+        return 1
+    if error.startswith("Unterminated YAML frontmatter"):
+        return max(len(lines), 1)
+    return None
+
+
+def _warn_skill_skipped(skill_md_path: Path, markdown: str, errors: List[str]) -> None:
+    if not errors:
+        return
+    if skill_md_path in _WARNED_SKILL_PARSE_PATHS:
+        return
+    _WARNED_SKILL_PARSE_PATHS.add(skill_md_path)
+
+    error = str(errors[0] or "invalid frontmatter").strip()
+    line = _frontmatter_error_line((markdown or "").splitlines(), error)
+    skill_label = skill_md_path.parent.name or str(skill_md_path)
+    location = f" at line {line}" if line is not None else ""
+    _emit_skill_scan_warning(
+        f"skill {skill_label} skipped: invalid frontmatter{location}: {error}"
+    )
+
+
 def skill_from_markdown(
     skill_md_path: Path,
     *,
@@ -267,6 +309,7 @@ def skill_from_markdown(
 
     fm, body, fm_errors = split_frontmatter(text)
     if fm_errors:
+        _warn_skill_skipped(skill_md_path, text, fm_errors)
         return None
     skill_dir = Path(files.normalize_a0_path(str(skill_md_path.parent)))
 
