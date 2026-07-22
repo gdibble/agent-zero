@@ -156,6 +156,8 @@ def test_right_canvas_uses_desktop_surface_id_and_migrates_legacy_office_state()
     assert 'input[type="checkbox"]' in editor_store
     assert "renderEditorPreviewMarkdown" in editor_store
     assert "buildMarkdownPages" in editor_store
+    assert "PAGE_HEADING_RE" not in editor_preview
+    assert "markdown: source" in editor_preview
     assert "hydrateActiveSession" in editor_store
     assert "refreshSourceEditorLayout" in editor_store
     assert "editor.resize?.(true)" in editor_store
@@ -170,7 +172,6 @@ def test_right_canvas_uses_desktop_surface_id_and_migrates_legacy_office_state()
     assert "renderSafeMarkdown" in editor_preview
     assert "prepareFootnotes" in editor_preview
     assert "resolveDocumentRelativePath" in editor_preview
-    assert "slice(start, end)" in editor_preview
     assert "allowDataImages: true" in editor_preview
     assert "allowLatex: true" in editor_preview
     assert "html = sanitizeHtml(html, options);" in safe_markdown
@@ -553,6 +554,7 @@ def test_editor_open_file_browser_prefers_context_home_before_workdir_fallback()
     assert "workdirPath = response?.settings?.workdir_path || workdirPath;" in open_file_browser
     assert "fileBrowserStore.openTextPicker" in open_file_browser
     assert "selectedFiles" in open_file_browser
+    assert "fileBrowserStore.normalizePath(file.path)" in open_file_browser
 
 
 def test_editor_toolbar_places_preview_toggle_left_and_save_on_right():
@@ -563,6 +565,7 @@ def test_editor_toolbar_places_preview_toggle_left_and_save_on_right():
     toolbar = editor_panel[toolbar_start:toolbar_end]
 
     mode_toggle = toolbar.index("editor-mode-toggle")
+    history_tools = toolbar.index("editor-history-tools")
     source_tools = toolbar.index("editor-source-tools")
     preview_tools = toolbar.index("editor-preview-tools")
     spacer = toolbar.index("editor-toolbar-spacer")
@@ -571,8 +574,8 @@ def test_editor_toolbar_places_preview_toggle_left_and_save_on_right():
     file_actions = toolbar.index("editor-file-actions")
     file_menu = toolbar.index("editor-file-menu")
 
-    assert mode_toggle < source_tools
-    assert mode_toggle < preview_tools
+    assert mode_toggle < history_tools < source_tools
+    assert history_tools < preview_tools
     assert spacer < save_button < save_as_button < file_actions < file_menu
     assert "@click=\"$store.editor.save()\"" in toolbar
     assert "@click=\"$store.editor.saveAs()\"" in toolbar
@@ -588,10 +591,66 @@ def test_editor_toolbar_places_preview_toggle_left_and_save_on_right():
     assert "<span>Close File</span>" in file_menu_markup
 
 
+def test_editor_uses_full_document_preview_and_matching_markdown_text_tools():
+    editor_panel = read("plugins", "_editor", "webui", "editor-panel.html")
+    editor_store = read("plugins", "_editor", "webui", "editor-store.js")
+
+    assert "Previous page" not in editor_panel
+    assert "Next page" not in editor_panel
+    assert "editor-page-count" not in editor_panel
+    assert "pagePositionLabel" not in editor_store
+    assert "nextPage()" not in editor_store
+    assert "previousPage()" not in editor_store
+    assert 'x-show="$store.editor.isTextDocument()"' in editor_panel
+    assert '$store.editor.isTextDocument() && $store.editor.isPreviewMode()' in editor_panel
+    assert 'mode === PREVIEW_MODE && this.isTextDocument()' in editor_store
+    assert "if (!this.session || !this.isTextDocument()) return;" in editor_store
+
+    source_tools_start = editor_panel.index('class="editor-tool-group editor-source-tools"')
+    preview_tools_start = editor_panel.index('class="editor-tool-group editor-preview-tools"')
+    source_tools = editor_panel[source_tools_start:preview_tools_start]
+    for action in ("Bold", "Italic", "List", "Numbered list", "Table"):
+        assert f'title="{action}"' in source_tools
+    assert "isMarkdown()" not in source_tools
+
+
+def test_editor_history_shortcuts_and_toolbar_controls_cover_markdown_and_text():
+    editor_panel = read("plugins", "_editor", "webui", "editor-panel.html")
+    editor_store = read("plugins", "_editor", "webui", "editor-store.js")
+
+    assert '@keydown.capture="$store.editor.handleEditorKeydown($event)"' in editor_panel
+    history_start = editor_panel.index('class="editor-tool-group editor-history-tools"')
+    source_start = editor_panel.index('class="editor-tool-group editor-source-tools"')
+    history_tools = editor_panel[history_start:source_start]
+    assert 'x-show="$store.editor.isTextDocument()"' in history_tools
+    assert 'title="Undo"' in history_tools
+    assert 'title="Redo"' in history_tools
+    assert "$store.editor.previewEditing || !$store.editor.canUndo()" in history_tools
+    assert "$store.editor.previewEditing || !$store.editor.canRedo()" in history_tools
+
+    keydown_start = editor_store.index("handleEditorKeydown(event)")
+    create_start = editor_store.index("\n  async create", keydown_start)
+    keydown = editor_store[keydown_start:create_start]
+    assert 'key === "z"' in keydown
+    assert 'key === "y"' in keydown
+    assert "event.stopPropagation()" in keydown
+    assert "this[historyAction]()" in keydown
+    assert "nativeEditing" in keydown
+
+    undo_start = editor_store.index("\n  undo()")
+    can_undo_start = editor_store.index("\n  canUndo()", undo_start)
+    history_actions = editor_store[undo_start:can_undo_start]
+    assert "sourceEditor.undo" not in history_actions
+    assert "sourceEditor.redo" not in history_actions
+    assert "pushHistory(text, coalesce = false)" in editor_store
+    assert "this.pushHistory(this.editorText, true)" in editor_store
+
+
 def test_desktop_text_open_with_routes_to_editor_surface():
     desktop_session = read("plugins", "_desktop", "helpers", "desktop_session.py")
     desktop_store = read("plugins", "_desktop", "webui", "desktop-store.js")
     editor_store = read("plugins", "_editor", "webui", "editor-store.js")
+    browser_store = read("plugins", "_browser", "webui", "browser-store.js")
 
     assert 'EDITOR_HANDLER_DESKTOP_ID = "agent-zero-editor.desktop"' in desktop_session
     assert "def _write_editor_bridge_script" in desktop_session
@@ -606,6 +665,17 @@ def test_desktop_text_open_with_routes_to_editor_surface():
     assert "registerUrlHandler" in editor_store
     assert "handleEditorUrlIntent" in editor_store
     assert 'openLatestSurface("editor"' in editor_store
+
+    # Text files default to LibreOffice Writer inside the Desktop; the Agent
+    # Zero Editor stays available as a secondary "Open With" association.
+    assert 'WRITER_HANDLER_DESKTOP_ID = "libreoffice-writer.desktop"' in desktop_session
+    assert "{mime_type}={WRITER_HANDLER_DESKTOP_ID}" in desktop_session
+    assert "[WRITER_HANDLER_DESKTOP_ID, editor_desktop_id, " in desktop_session
+
+    # The browser surface must not claim a0-editor: intents, otherwise the
+    # editor "Open With" handler lands on an unloadable about:blank page.
+    assert "function isWebUrlIntent" in browser_store
+    assert "if (!isWebUrlIntent(url)) return false;" in browser_store
 
 
 def test_office_and_desktop_skills_are_rehomed_and_renamed():

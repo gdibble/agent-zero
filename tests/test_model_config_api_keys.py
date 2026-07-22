@@ -1,3 +1,4 @@
+import json
 import sys
 import threading
 import types
@@ -106,7 +107,7 @@ async def test_missing_api_key_banner_exposes_missing_providers(monkeypatch):
     assert "onboarding-banner-btn-container" not in row["html"]
 
 
-def test_model_config_frontend_tracks_inline_api_key_edits():
+def test_model_config_frontend_tracks_provider_api_key_edits():
     store_path = PROJECT_ROOT / "plugins" / "_model_config" / "webui" / "model-config-store.js"
     api_keys_mixin_path = PROJECT_ROOT / "plugins" / "_model_config" / "webui" / "api-keys-mixin.js"
     model_gate_path = PROJECT_ROOT / "webui" / "components" / "chat" / "model-gate-store.js"
@@ -120,10 +121,15 @@ def test_model_config_frontend_tracks_inline_api_key_edits():
         + api_keys_mixin_path.read_text(encoding="utf-8")
     )
     model_gate_content = model_gate_path.read_text(encoding="utf-8")
+    preset_modal_content = (
+        PROJECT_ROOT / "plugins" / "_model_config" / "webui" / "main.html"
+    ).read_text(encoding="utf-8")
     config_content = (
         config_path.read_text(encoding="utf-8")
         + "\n"
         + model_field_path.read_text(encoding="utf-8")
+        + "\n"
+        + preset_modal_content
     )
     modal_content = modal_path.read_text(encoding="utf-8")
 
@@ -134,8 +140,12 @@ def test_model_config_frontend_tracks_inline_api_key_edits():
     assert 'callJsonApi("/plugins/_model_config/model_config_get"' in model_gate_content
     assert "dispatchPendingIfConfigured()" in model_gate_content
     assert "/plugins/_model_config/missing_api_key_status" not in model_gate_content
-    assert "$store.modelConfig.resetApiKeyDrafts();" in config_content
     assert '@input="$store.modelConfig.setApiKeyValue(_prov, $el.value)"' in config_content
+    assert "apiKeyMode: 'none'" not in preset_modal_content
+    assert preset_modal_content.count("apiKeyMode: 'store'") == 3
+    assert "$store.modelConfig.resetApiKeyDrafts();" in preset_modal_content
+    assert "await $store.modelConfig.refreshApiKeyStatus();" in preset_modal_content
+    assert "await store.persistAllDirtyApiKeys();" in store_content
     assert "persistAllDirtyApiKeys()" in modal_content
     assert "$store.modelConfig.resetApiKeyDrafts();" in modal_content
 
@@ -165,14 +175,30 @@ def test_model_switcher_frontend_renders_custom_overrides():
     )
 
     switcher_content = switcher_path.read_text(encoding="utf-8")
+    switcher_html = (
+        PROJECT_ROOT
+        / "plugins"
+        / "_model_config"
+        / "extensions"
+        / "webui"
+        / "chat-input-progress-start"
+        / "model-switcher.html"
+    ).read_text(encoding="utf-8")
     refresh_extension_content = refresh_extension_path.read_text(encoding="utf-8")
 
     assert "function normalizeModelIdentity(value)" in switcher_content
-    assert "formatModelIdentity(models.main)" in switcher_content
-    assert "formatModelIdentity(models.utility)" in switcher_content
+    assert "export function getModelLeafName(value)" in switcher_content
+    assert 'name.lastIndexOf("/") + 1' in switcher_content
+    assert "`${presetName} ${mainModelName}`" in switcher_content
+    assert "formatModelIdentity(models.utility)" not in switcher_content
     assert "normalizeModelIdentity(o.chat || o)" in switcher_content
     assert "normalizeModelIdentity(o.utility)" in switcher_content
+    assert "$store.modelConfig.getSwitcherLabel()" in switcher_html
+    assert "model-switcher-active-pills" not in switcher_html
+    assert "model-pill-role" not in switcher_html
     assert "_model_config_override_revision" in refresh_extension_content
+    assert "activeContext?.agent_profile" in refresh_extension_content
+    assert "activeContext?.project" in refresh_extension_content
     assert "modelConfigStore.refreshSwitcher(contextId)" in refresh_extension_content
 
 
@@ -230,7 +256,7 @@ def test_connector_model_switcher_notifies_state_sync(monkeypatch):
     assert calls == [("ctx-1", "a0_connector.model_switcher")]
 
 
-def test_model_config_provider_switch_resets_custom_api_base():
+def test_model_config_provider_switch_resets_provider_specific_fields():
     model_field_path = PROJECT_ROOT / "plugins" / "_model_config" / "webui" / "model-field.html"
     content = model_field_path.read_text(encoding="utf-8")
     select_start = content.index('<select x-model="model.provider"')
@@ -238,7 +264,18 @@ def test_model_config_provider_switch_resets_custom_api_base():
     provider_select = content[select_start:select_end]
 
     assert 'x-model="model.provider"' in provider_select
-    assert '@change="model.api_base = \'\'"' in provider_select
+    assert "model.api_base = ''" in provider_select
+    assert "model.kwargs = {}" in provider_select
+    assert "model._kwargs_text = ''" in provider_select
+
+
+def test_model_config_model_field_opens_search_on_click():
+    model_field_path = PROJECT_ROOT / "plugins" / "_model_config" / "webui" / "model-field.html"
+    content = model_field_path.read_text(encoding="utf-8")
+
+    assert '@click="openSearch($el)"' in content
+    assert '<button class="model-search-btn"' in content
+    assert 'aria-label="Search available models"' in content
 
 
 def test_model_config_primary_context_controls_are_outside_advanced_settings():
@@ -265,9 +302,153 @@ def test_ollama_cloud_provider_config_requires_key_and_base_url():
     ollama_cloud = provider_config["chat"]["ollama_cloud"]
 
     assert ollama_cloud["name"] == "Ollama Cloud"
+    assert ollama_cloud["kwargs"]["a0_api_mode"] == "chat"
     assert ollama_cloud["kwargs"]["api_base"] == "https://ollama.com/v1"
     assert ollama_cloud["models_list"]["endpoint_url"] == "/models"
     assert "api_key_mode" not in ollama_cloud
+
+
+def test_direct_venice_chat_provider_defaults_to_chat_completions(monkeypatch):
+    import yaml
+
+    monkeypatch.setattr(models, "get_api_key", lambda provider: "None")
+
+    provider_path = PROJECT_ROOT / "conf/model_providers.yaml"
+    provider_config = yaml.safe_load(provider_path.read_text(encoding="utf-8"))
+
+    venice = provider_config["chat"]["venice"]
+    assert venice["kwargs"]["a0_api_mode"] == "chat"
+    assert venice["kwargs"]["api_base"] == "https://api.venice.ai/api/v1"
+    assert venice["kwargs"]["venice_parameters"] == {
+        "include_venice_system_prompt": False
+    }
+    assert "a0_api_mode" not in provider_config["chat"]["a0_venice"]["kwargs"]
+    assert "a0_api_mode" not in provider_config["embedding"]["venice"]["kwargs"]
+
+    model = models.get_chat_model("venice", "llama-3.3-70b")
+    assert model.kwargs["a0_api_mode"] == "chat"
+
+    custom = models.get_chat_model(
+        "venice",
+        "llama-3.3-70b",
+        a0_api_mode="responses",
+    )
+    assert custom.kwargs["a0_api_mode"] == "responses"
+
+
+def test_model_config_migration_repairs_saved_venice_user_slots(monkeypatch, tmp_path):
+    import yaml
+
+    from helpers import files
+    from plugins._model_config.extensions.python.startup_migration._10_migrate_model_config import (
+        MigrateModelConfig,
+    )
+
+    monkeypatch.setattr(files, "_base_dir", str(tmp_path))
+    plugin_dir = tmp_path / "usr" / "plugins" / "_model_config"
+    plugin_dir.mkdir(parents=True)
+    expected = {
+        "a0_api_mode": "chat",
+        "venice_parameters": {"include_venice_system_prompt": False},
+    }
+
+    config_path = plugin_dir / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "chat_model": {
+                    "provider": "venice",
+                    "name": "llama-3.3-70b",
+                    "kwargs": {"a0_api_mode": "responses"},
+                },
+                "utility_model": {
+                    "provider": "a0_venice",
+                    "name": "venice-proxy",
+                    "kwargs": {"a0_api_mode": "responses"},
+                },
+                "embedding_model": {
+                    "provider": "venice",
+                    "name": "embed",
+                    "kwargs": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    presets_path = plugin_dir / "presets.yaml"
+    presets_path.write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "name": "Venice",
+                    "chat": {
+                        "provider": "venice",
+                        "name": "llama-3.3-70b",
+                        "kwargs": {"venice_parameters": {"include_venice_system_prompt": True}},
+                    },
+                    "utility": {
+                        "provider": "a0_venice",
+                        "name": "proxy",
+                        "kwargs": {"keep": True},
+                    },
+                },
+                {
+                    "name": "Legacy raw preset",
+                    "provider": "venice",
+                    "name": "raw",
+                    "kwargs": {"a0_api_mode": "responses"},
+                },
+            ],
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    MigrateModelConfig(agent=None).execute()
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    presets = yaml.safe_load(presets_path.read_text(encoding="utf-8"))
+
+    assert config == {"model_preset": "Default"}
+    assert presets[0]["name"] == "Default"
+    assert presets[0]["chat"]["kwargs"] == expected
+    assert presets[0]["embedding"]["kwargs"] == expected
+    assert presets[0]["utility"]["kwargs"] == {"a0_api_mode": "responses"}
+    assert presets[1]["chat"]["kwargs"] == expected
+    assert presets[1]["utility"]["kwargs"] == {"keep": True}
+    assert presets[2]["chat"]["kwargs"] == expected
+    assert (plugin_dir / "config.json.pre-unified-presets.bak").exists()
+
+
+def test_local_chat_providers_default_to_chat_completions():
+    import yaml
+
+    provider_path = PROJECT_ROOT / "conf/model_providers.yaml"
+    provider_config = yaml.safe_load(provider_path.read_text(encoding="utf-8"))
+
+    chat_completions_default_providers = (
+        "lm_studio",
+        "llama_cpp",
+        "ollama",
+        "ollama_cloud",
+        "omlx",
+        "other",
+        "vllm",
+    )
+    local_embedding_providers = (
+        "lm_studio",
+        "llama_cpp",
+        "ollama",
+        "omlx",
+        "vllm",
+    )
+
+    for provider in chat_completions_default_providers:
+        assert provider_config["chat"][provider]["kwargs"]["a0_api_mode"] == "chat"
+
+    for provider in local_embedding_providers:
+        assert "a0_api_mode" not in provider_config["embedding"][provider]["kwargs"]
 
 
 def test_missing_api_key_banner_does_not_include_auto_modal_metadata(monkeypatch):

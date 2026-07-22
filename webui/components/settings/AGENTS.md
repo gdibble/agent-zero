@@ -14,10 +14,13 @@
 ## Local Contracts
 
 - Keep settings payloads synchronized with backend APIs and plugin settings contracts.
+- Settings tabs that expose plugin `settings_sections` must mount `settings/plugins/plugins-subsection.html` with matching `data-tab` and sidebar/nav section IDs.
 - Do not store secrets in localStorage, URLs, or console output.
 - Preserve Store Gating and modal footer conventions in settings components.
+- Interface control visibility is edited as a Save/Cancel draft, persisted with instance settings, and applied through the shared frontend preference store after Settings saves successfully.
 - MCP manager tool toggles write `disabled_tools` into the draft JSON and require Apply before changing the running MCP tool set.
 - Confirmed MCP server removals apply immediately and refresh server status; other MCP manager draft edits still require Apply.
+- MCP manager local command forms accept shell-style command and argument lines; quote argument values that intentionally contain spaces.
 
 ## Work Guidance
 
@@ -29,7 +32,7 @@
 
 ## Verification
 
-- Smoke-test changed settings tabs and save/reload behavior after visible or API changes.
+- Smoke-test changed settings tabs, Interface mobile/desktop selectors, and save/reload behavior after visible or API changes.
 
 ## Child DOX Index
 

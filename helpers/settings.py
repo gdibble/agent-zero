@@ -56,8 +56,10 @@ class Settings(TypedDict):
 
     agent_profile: str
     agent_knowledge_subdir: str
+    max_consecutive_unusable_responses: int
     timezone: str
     time_format: str
+    ui_control_visibility: dict[str, dict[str, bool]]
 
     workdir_path: str
     workdir_show: bool
@@ -163,6 +165,12 @@ API_KEY_PLACEHOLDER = "************"
 TIMEZONE_AUTO = "auto"
 TIME_FORMAT_12H = "12h"
 TIME_FORMAT_24H = "24h"
+UI_CONTROL_VISIBILITY_DEFAULTS = {
+    "projectSelector": {"mobile": True, "desktop": True},
+    "time": {"mobile": False, "desktop": True},
+    "connectionStatus": {"mobile": True, "desktop": True},
+    "rightCanvasRail": {"mobile": True, "desktop": True},
+}
 
 SETTINGS_FILE = files.get_abs_path("usr/settings.json")
 _settings: Settings | None = None
@@ -207,6 +215,22 @@ def _normalize_time_format(value: Any, default: str = TIME_FORMAT_12H) -> str:
     if time_format in {TIME_FORMAT_12H, TIME_FORMAT_24H}:
         return time_format
     return default if default in {TIME_FORMAT_12H, TIME_FORMAT_24H} else TIME_FORMAT_12H
+
+
+def _normalize_ui_control_visibility(value: Any) -> dict[str, dict[str, bool]]:
+    submitted = value if isinstance(value, dict) else {}
+    normalized = {}
+    for control, devices in UI_CONTROL_VISIBILITY_DEFAULTS.items():
+        submitted_devices = submitted.get(control, {})
+        if not isinstance(submitted_devices, dict):
+            submitted_devices = {}
+        normalized[control] = {
+            device: submitted_devices.get(device)
+            if isinstance(submitted_devices.get(device), bool)
+            else default
+            for device, default in devices.items()
+        }
+    return normalized
 
 
 def _resolve_runtime_timezone(setting_value: str, browser_timezone: str | None = None) -> str:
@@ -401,8 +425,12 @@ def normalize_settings(settings: Settings) -> Settings:
 
     # mcp server token is set automatically
     copy["mcp_server_token"] = create_auth_token()
+    copy["max_consecutive_unusable_responses"] = max(
+        1, copy["max_consecutive_unusable_responses"]
+    )
     copy["timezone"] = _normalize_timezone_setting(copy.get("timezone"), default["timezone"])
     copy["time_format"] = _normalize_time_format(copy.get("time_format"), default["time_format"])
+    copy["ui_control_visibility"] = _normalize_ui_control_visibility(copy.get("ui_control_visibility"))
 
     return copy
 
@@ -498,8 +526,14 @@ def get_default_settings() -> Settings:
         root_password="",
         agent_profile=get_default_value("agent_profile", "agent0"),
         agent_knowledge_subdir=get_default_value("agent_knowledge_subdir", "custom"),
+        max_consecutive_unusable_responses=get_default_value(
+            "max_consecutive_unusable_responses", 2
+        ),
         timezone=_normalize_timezone_setting(get_default_value("timezone", TIMEZONE_AUTO)),
         time_format=_normalize_time_format(get_default_value("time_format", TIME_FORMAT_12H)),
+        ui_control_visibility=_normalize_ui_control_visibility(
+            get_default_value("ui_control_visibility", UI_CONTROL_VISIBILITY_DEFAULTS)
+        ),
         workdir_path=get_default_value("workdir_path", files.get_abs_path_dockerized("usr/workdir")),
         workdir_show=get_default_value("workdir_show", True),
         workdir_max_depth=get_default_value("workdir_max_depth", 5),

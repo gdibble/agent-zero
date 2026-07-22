@@ -268,6 +268,7 @@ def test_computer_use_remote_prompt_keeps_runtime_failures_actionable():
     assert "disabled computer use" in prompt
     assert "COMPUTER_USE_REARM_REQUIRED" in prompt
     assert "/computer-use on" in prompt
+    assert "A0 Launcher chat" in prompt
 
 
 def test_computer_use_remote_prompt_requires_visual_verification_after_actions():
@@ -624,6 +625,7 @@ def test_host_browser_requests_route_to_browser_tool_not_desktop_or_shell_fallba
     assert "code_execution_remote" in browser_prompt
     assert "Python `webbrowser.open`" in browser_prompt
     assert "chrome://inspect/#remote-debugging" in browser_prompt
+    assert "opera://inspect/#remote-debugging" in browser_prompt
     assert "Do not start `computer_use_remote` for web-page navigation" in computer_skill
     assert (
         "Do not fall back to `code_execution_remote`, `xdg-open`, `sensible-browser`, "

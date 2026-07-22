@@ -431,6 +431,7 @@ def find_skill(
     agent:Agent|None=None,
     include_content: bool = False,
     include_hidden: bool = False,
+    validate: bool = True,
 ) -> Optional[Skill]:
     target = _normalize_name(skill_name)
     if not target:
@@ -440,7 +441,11 @@ def find_skill(
 
     for root in roots:
         for skill_md in discover_skill_md_files(Path(root)):
-            s = skill_from_markdown(skill_md, include_content=include_content)
+            s = skill_from_markdown(
+                skill_md,
+                include_content=include_content,
+                validate=validate,
+            )
             if not s:
                 continue
             if _normalize_name(s.name) == target or _normalize_name(s.path.name) == target:
@@ -543,11 +548,15 @@ def search_skills(
     if not q:
         return []
 
-    raw_terms = [t for t in re.split(r"\s+", q) if t]
+    raw_terms = re.findall(r"[a-z0-9][a-z0-9_-]*", q)
     terms = [
         t for t in raw_terms
-        if len(t) >= 3 or any(ch.isdigit() for ch in t)
-    ] or raw_terms
+        if len(t) >= 4 or any(ch.isdigit() for ch in t)
+    ]
+    long_terms = [
+        t for t in raw_terms
+        if len(t) >= 6 or any(ch.isdigit() for ch in t)
+    ]
     candidates = list_skills(agent, include_hidden=include_hidden)
 
     scored: List[Tuple[int, Skill]] = []
@@ -568,14 +577,13 @@ def search_skills(
             score += 4
         if any(q in tag for tag in tags):
             score += 3
-        if any(q in trigger for trigger in triggers):
+        if any(q in trigger or trigger in q for trigger in triggers):
             score += 8
 
         for term in terms:
             if term in name:
                 score += 3
-            if term in desc:
-                score += 2
+        for term in long_terms:
             if any(term in tag for tag in tags):
                 score += 1
             if any(term in trigger for trigger in triggers):
@@ -1132,7 +1140,6 @@ def hide_chat_skill(agent: Agent, entry: Any) -> list[ActiveSkillEntry]:
         CONTEXT_DATA_NAME_CHAT_VISIBLE_SKILLS,
         visible_entries,
     )
-    unload_agent_skill(agent, normalized)
     return get_hidden_skills(agent)
 
 
@@ -1183,8 +1190,7 @@ def clear_chat_skill_overrides(agent: Agent) -> list[ActiveSkillEntry]:
 
 
 def build_active_skills_prompt(agent: Agent | None) -> str:
-    items = _resolve_active_skill_entries(agent, get_active_skills(agent))
-    return "\n\n".join(item["content"] for item in items if item.get("content")).strip()
+    return ""
 
 
 def _format_skill_prompt(skill: Skill) -> str:

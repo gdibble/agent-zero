@@ -150,11 +150,19 @@ class Message(Record):
     @staticmethod
     def from_dict(data: dict, history: "History"):
         content = data.get("content", "Content lost")
+        metadata = data.get("metadata", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        if data["ai"]:
+            from helpers.llm_result import result_from_metadata
+
+            result = result_from_metadata(metadata)
+            if result:
+                metadata = {**metadata, **result.metadata()}
         msg = Message(
             ai=data["ai"],
             content=content,
             id=data.get("id", ""),
-            metadata=data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {},
+            metadata=metadata,
             sequence=int(data.get("sequence", 0) or 0),
         )
         msg.summary = data.get("summary", "")
@@ -721,6 +729,28 @@ def output_langchain(messages: list[OutputMessage]):
 
 def output_text(messages: list[OutputMessage], ai_label="ai", human_label="human"):
     return "\n".join(_stringify_output(o, ai_label, human_label) for o in messages)
+
+
+def clear_responses_provider_state(agent) -> None:
+    key = getattr(agent, "DATA_NAME_RESPONSES_STATE", "responses_state")
+    get_data = getattr(agent, "get_data", None)
+    set_data = getattr(agent, "set_data", None)
+    if not callable(get_data) or not callable(set_data):
+        return
+
+    state = get_data(key)
+    if not isinstance(state, dict):
+        return
+
+    state = dict(state)
+    removed = False
+    for field in ("response_id", "previous_response_id"):
+        if field in state:
+            state.pop(field, None)
+            removed = True
+
+    if removed:
+        set_data(key, state)
 
 
 def _merge_outputs(a: MessageContent, b: MessageContent) -> MessageContent:

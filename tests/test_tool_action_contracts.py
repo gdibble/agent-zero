@@ -140,6 +140,8 @@ def _load_skills_tool(monkeypatch, skill_root: Path):
     skills_stub.set_loaded_skill_names = _set_loaded_skill_names
     skills_stub.skill_instruction_name = _skill_instruction_name
     monkeypatch.setitem(sys.modules, "helpers.skills", skills_stub)
+    import helpers
+    monkeypatch.setattr(helpers, "skills", skills_stub, raising=False)
 
     print_style_stub = types.ModuleType("helpers.print_style")
     print_style_stub.PrintStyle = lambda *args, **kwargs: types.SimpleNamespace(
@@ -209,6 +211,33 @@ def _load_loaded_skills_extension(monkeypatch, skill_root: Path):
     monkeypatch.setitem(sys.modules, "tools.skills_tool", skills_tool_stub)
 
     module_name = "extensions.python.message_loop_prompts_after._65_include_loaded_skills"
+    sys.modules.pop(module_name, None)
+    return importlib.import_module(module_name)
+
+
+def _load_relevant_skills_extension(monkeypatch, queries: list[str]):
+    extension_stub = types.ModuleType("helpers.extension")
+    extension_stub.Extension = _FakeExtension
+    monkeypatch.setitem(sys.modules, "helpers.extension", extension_stub)
+
+    agent_stub = types.ModuleType("agent")
+    agent_stub.LoopData = lambda **kwargs: types.SimpleNamespace(**kwargs)
+    monkeypatch.setitem(sys.modules, "agent", agent_stub)
+
+    skills_stub = types.ModuleType("helpers.skills")
+
+    def _search_skills(query, *args, **kwargs):
+        queries.append(query)
+        return []
+
+    skills_stub.search_skills = _search_skills
+    monkeypatch.setitem(sys.modules, "helpers.skills", skills_stub)
+
+    import helpers
+
+    monkeypatch.setattr(helpers, "skills", skills_stub, raising=False)
+
+    module_name = "extensions.python.message_loop_prompts_after._63_recall_relevant_skills"
     sys.modules.pop(module_name, None)
     return importlib.import_module(module_name)
 
@@ -401,8 +430,8 @@ def test_loaded_skills_extension_reattaches_missing_body_after_compaction(
     module = _load_loaded_skills_extension(monkeypatch, tmp_path)
     agent = _FakeLoadedSkillAgent()
     loop_data = types.SimpleNamespace(
-        protocol_persistent={"loaded_skills": "legacy"},
-        extras_persistent={"loaded_skills": "legacy"},
+        protocol_persistent={},
+        extras_persistent={},
         history_output=[
             {
                 "ai": False,
@@ -413,8 +442,6 @@ def test_loaded_skills_extension_reattaches_missing_body_after_compaction(
 
     asyncio.run(module.IncludeLoadedSkills(agent).execute(loop_data))
 
-    assert "loaded_skills" not in loop_data.protocol_persistent
-    assert "loaded_skills" not in loop_data.extras_persistent
     assert len(agent.added_tool_results) == 1
     added = agent.added_tool_results[0]
     assert added["tool_name"] == "skills_tool"
@@ -469,6 +496,28 @@ def test_loaded_skills_extension_keeps_reattachments_under_budget(
     asyncio.run(module.IncludeLoadedSkills(agent).execute(loop_data))
 
     assert agent.added_tool_results == []
+
+
+def test_relevant_skill_recall_uses_raw_user_message(monkeypatch):
+    queries: list[str] = []
+    module = _load_relevant_skills_extension(monkeypatch, queries)
+    agent = types.SimpleNamespace()
+    loop_data = types.SimpleNamespace(
+        iteration=0,
+        user_message=types.SimpleNamespace(
+            content={
+                "system_message": [],
+                "user_message": "Open a browser and take a screenshot.",
+                "attachments": [],
+            },
+            output_text=lambda: 'user: {"user_message": "wrapped"}',
+        ),
+        extras_temporary={},
+    )
+
+    asyncio.run(module.RecallRelevantSkills(agent).execute(loop_data=loop_data))
+
+    assert queries == ["Open a browser and take a screenshot."]
 
 
 def test_skills_tool_read_file_action_reads_inside_skill_dir(

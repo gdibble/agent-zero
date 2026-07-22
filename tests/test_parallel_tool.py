@@ -384,7 +384,7 @@ async def test_parallel_subordinate_jobs_are_visible_child_logs_not_scheduler_ta
 
 
 @pytest.mark.asyncio
-async def test_parallel_direct_tool_jobs_log_normal_tool_metadata(monkeypatch) -> None:
+async def test_parallel_direct_tool_jobs_fallback_to_generic_tool_log_type(monkeypatch) -> None:
     class FakeDeferredTask:
         def __init__(self, thread_name=None) -> None:
             self.thread_name = thread_name
@@ -404,6 +404,7 @@ async def test_parallel_direct_tool_jobs_log_normal_tool_metadata(monkeypatch) -
             pass
 
     monkeypatch.setattr(parallel_tools, "DeferredTask", FakeDeferredTask)
+    monkeypatch.setattr(parallel_tools, "_resolve_parallel_tool", lambda *_args, **_kwargs: None)
     agent = _FakeAgent()
 
     jobs = await parallel_tools.start_parallel_jobs(
@@ -425,6 +426,190 @@ async def test_parallel_direct_tool_jobs_log_normal_tool_metadata(monkeypatch) -
 
     assert agent.context.log.items[0].content == "done"
     assert agent.context.log.items[0].kvps == {"seconds": 1, "_tool_name": "wait"}
+
+
+@pytest.mark.asyncio
+async def test_parallel_code_execution_child_uses_code_exe_log_type(monkeypatch) -> None:
+    class FakeDeferredTask:
+        def __init__(self, thread_name=None) -> None:
+            self.thread_name = thread_name
+
+        def start_task(self, func, *args):
+            return self
+
+        def is_ready(self):
+            return False
+
+        def is_alive(self):
+            return True
+
+        def kill(self):
+            pass
+
+    class FakeCodeExecutionTool:
+        def __init__(self, agent, args):
+            self.agent = agent
+            self.args = args
+
+        def get_log_object(self):
+            runtime = self.args.get("runtime", "unknown")
+            session = self.args.get("session", None)
+            session_text = f"[{session}] " if session or session == 0 else ""
+            return self.agent.context.log.log(
+                type="code_exe",
+                heading=f"icon://terminal {session_text}code_execution_tool - {runtime}",
+                content="",
+                kvps=self.args,
+            )
+
+    monkeypatch.setattr(parallel_tools, "DeferredTask", FakeDeferredTask)
+    monkeypatch.setattr(
+        parallel_tools,
+        "_resolve_parallel_tool",
+        lambda _agent, _tool_name, args: FakeCodeExecutionTool(_agent, args),
+    )
+    agent = _FakeAgent()
+
+    jobs = await parallel_tools.start_parallel_jobs(
+        agent,  # type: ignore[arg-type]
+        [
+            parallel_tools.NormalizedToolCall(
+                index=0,
+                tool_name="code_execution_tool",
+                tool_args={
+                    "runtime": "terminal",
+                    "session": 0,
+                    "code": "pwd",
+                },
+            )
+        ],
+    )
+
+    assert jobs[0].kind == "tool"
+    assert agent.context.log.items[0].type == "code_exe"
+    assert agent.context.log.items[0].heading == "icon://terminal [0] code_execution_tool - terminal"
+    assert agent.context.log.items[0].kvps == {
+        "runtime": "terminal",
+        "session": 0,
+        "code": "pwd",
+    }
+
+
+@pytest.mark.asyncio
+async def test_parallel_wait_child_uses_wait_log_type(monkeypatch) -> None:
+    class FakeDeferredTask:
+        def __init__(self, thread_name=None) -> None:
+            self.thread_name = thread_name
+
+        def start_task(self, func, *args):
+            return self
+
+        def is_ready(self):
+            return False
+
+        def is_alive(self):
+            return True
+
+        def kill(self):
+            pass
+
+    class FakeWaitTool:
+        def __init__(self, agent, args):
+            self.agent = agent
+            self.args = args
+
+        def get_log_object(self):
+            return self.agent.context.log.log(
+                type="progress",
+                heading="icon://timer Wait: Waiting...",
+                content="",
+                kvps=self.args,
+            )
+
+    monkeypatch.setattr(parallel_tools, "DeferredTask", FakeDeferredTask)
+    monkeypatch.setattr(
+        parallel_tools,
+        "_resolve_parallel_tool",
+        lambda _agent, _tool_name, args: FakeWaitTool(_agent, args),
+    )
+    agent = _FakeAgent()
+
+    jobs = await parallel_tools.start_parallel_jobs(
+        agent,  # type: ignore[arg-type]
+        [
+            parallel_tools.NormalizedToolCall(
+                index=0,
+                tool_name="wait",
+                tool_args={"seconds": 1},
+            )
+        ],
+    )
+
+    assert jobs[0].kind == "tool"
+    assert agent.context.log.items[0].type == "progress"
+    assert agent.context.log.items[0].heading == "icon://timer Wait: Waiting..."
+    assert agent.context.log.items[0].kvps == {"seconds": 1}
+
+
+@pytest.mark.asyncio
+async def test_parallel_execute_reuses_child_log_object(monkeypatch) -> None:
+    class FakeTool:
+        def __init__(self, agent, args):
+            self.agent = agent
+            self.args = args
+
+        def get_log_object(self):
+            return self.agent.context.log.log(
+                type="tool",
+                heading="generic tool log",
+                content="",
+                kvps=self.args,
+            )
+
+        async def before_execution(self, **kwargs):
+            self.log = self.get_log_object()
+
+        async def execute(self, **kwargs):
+            return Response(message="done", break_loop=False)
+
+        async def after_execution(self, response):
+            self.log.update(content=response.message)
+
+    class FakeWorkerAgent(_FakeAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.loop_data = SimpleNamespace(current_tool=None)
+
+        def get_tool(self, **kwargs):
+            return FakeTool(self, kwargs["args"])
+
+        async def handle_intervention(self):
+            pass
+
+    async def noop_extensions(*_args, **_kwargs):
+        pass
+
+    monkeypatch.setattr(parallel_tools, "call_extensions_async", noop_extensions)
+
+    agent = FakeWorkerAgent()
+    child_log = agent.context.log.log(
+        type="progress",
+        heading="icon://timer Wait: Waiting...",
+        content="",
+        kvps={"seconds": 1},
+    )
+
+    result = await parallel_tools.execute_tool_call(
+        agent,  # type: ignore[arg-type]
+        "wait",
+        {"seconds": 1},
+        log_item=child_log,
+    )
+
+    assert result == "done"
+    assert agent.context.log.items == [child_log]
+    assert child_log.type == "progress"
+    assert child_log.content == "done"
 
 
 @pytest.mark.asyncio

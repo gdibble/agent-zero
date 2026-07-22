@@ -150,6 +150,35 @@ def test_hidden_skills_are_not_capped_like_active_skills():
     assert len(runtime.get_hidden_skills(agent)) == 25
 
 
+def test_active_skill_prompt_protocol_is_disabled(monkeypatch):
+    monkeypatch.setattr(
+        runtime.plugin_helpers,
+        "get_plugin_config",
+        lambda *args, **kwargs: _scope_config([{"name": "Pinned"}]),
+    )
+    agent = DummyAgent()
+
+    assert runtime.get_active_skills(agent) == [{"name": "Pinned"}]
+    assert runtime.build_active_skills_prompt(agent) == ""
+
+
+def test_hiding_skill_does_not_unload_history_loaded_skill():
+    agent = DummyAgent()
+    agent.context.set_data(
+        runtime.CONTEXT_DATA_NAME_LOADED_SKILLS,
+        ["history-skill"],
+    )
+
+    runtime.hide_chat_skill(agent, {"name": "history-skill"})
+
+    assert agent.context.get_data(runtime.CONTEXT_DATA_NAME_LOADED_SKILLS) == [
+        "history-skill"
+    ]
+    assert runtime.get_chat_disabled_skills(agent.context) == [
+        {"name": "history-skill"}
+    ]
+
+
 def test_chat_activation_can_override_scope_defaults(monkeypatch):
     monkeypatch.setattr(
         runtime.plugin_helpers,
@@ -442,6 +471,27 @@ def test_browser_skills_rank_for_browser_trigger_phrases(monkeypatch):
     ]
     assert "browser-automation" in form_results
     assert "browser-form-workflows" in form_results
+
+
+def test_skill_search_does_not_score_description_terms_alone(monkeypatch):
+    browser_automation = runtime.Skill(
+        name="browser-automation",
+        description=(
+            "Use for browser automation, screenshots, forms, uploads, "
+            "and complex tool workflows."
+        ),
+        path=Path("/skills/browser-automation"),
+        skill_md_path=Path("/skills/browser-automation/SKILL.md"),
+    )
+    monkeypatch.setattr(runtime, "list_skills", lambda *args, **kwargs: [browser_automation])
+
+    rendered_user_message = (
+        'user: {"user_message": "Please reply with exactly OK. Do not use tools.", '
+        '"attachments": []}'
+    )
+
+    assert runtime.search_skills(rendered_user_message) == []
+    assert runtime.search_skills("Open a browser screenshot?", limit=1) == [browser_automation]
 
 
 def test_host_computer_use_ranks_before_linux_desktop_for_host_screen_queries(monkeypatch):

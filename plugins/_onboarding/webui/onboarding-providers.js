@@ -8,6 +8,7 @@ export const TOP_CLOUD_PROVIDER_IDS = [
   "venice",
   "zai",
   "mistral",
+  "nvidia_nim",
   "azure",
 ];
 
@@ -162,6 +163,15 @@ export const ONBOARDING_PROVIDER_OVERRIDES = {
     model_list_autoload: true,
     short_description: "OpenAI-compatible inference for open models.",
   },
+  nvidia_nim: {
+    logo: "https://www.nvidia.com/favicon.ico",
+    setup_url: "https://build.nvidia.com/",
+    api_key_url: "https://build.nvidia.com/settings/api-keys",
+    docs_url: "https://docs.api.nvidia.com/nim/reference/llm-apis",
+    api_key_mode: "required",
+    model_list_autoload: true,
+    short_description: "NVIDIA-optimized models through hosted NIM APIs.",
+  },
   ollama: {
     logo: "https://ollama.com/public/ollama.png",
     setup_url: "https://ollama.com/download",
@@ -213,8 +223,8 @@ export const ONBOARDING_PROVIDER_OVERRIDES = {
     setup_url: "https://openrouter.ai/",
     api_key_url: "https://openrouter.ai/workspaces/default/keys",
     docs_url: "https://openrouter.ai/workspaces/default/keys",
-    default_chat_model: "anthropic/claude-sonnet-5",
-    default_utility_model: "google/gemini-3.1-flash-lite-preview",
+    default_chat_model: "openai/gpt-5.6-terra",
+    default_utility_model: "google/gemini-3.1-flash-lite",
     api_key_mode: "required",
     model_list_autoload: true,
     short_description: "One key for many model families.",
